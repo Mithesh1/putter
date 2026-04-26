@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:math';
+import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:designcode/ble_contract.dart';
 import 'package:designcode/models/stroke_packet.dart';
 import 'package:designcode/packet_codec.dart';
 import 'package:designcode/services/ble_transport.dart';
@@ -47,6 +49,8 @@ class AppController {
       StreamController<String>.broadcast();
   final StreamController<String> _diagnosticController =
       StreamController<String>.broadcast();
+  final StreamController<String> _livePuttStateController =
+      StreamController<String>.broadcast();
 
   StreamSubscription<Uint8List>? _transportDataSubscription;
   StreamSubscription<BleConnectionState>? _transportStateSubscription;
@@ -67,6 +71,9 @@ class AppController {
   String get transportName => _transport.transportName;
 
   BleConnectionState get connectionState => _transport.connectionState;
+  String _livePuttState = 'Idle';
+
+  String get livePuttState => _livePuttState;
 
   Future<void> initialize() async {
     if (_isInitialized) {
@@ -88,6 +95,7 @@ class AppController {
     });
 
     _syncStatusController.add(_syncService.status);
+    _livePuttStateController.add(_livePuttState);
     _syncStatusSubscription = _syncService.statusStream.listen(
       _syncStatusController.add,
     );
@@ -115,6 +123,8 @@ class AppController {
   Stream<String> watchSyncStatus() => _syncStatusController.stream;
 
   Stream<String> watchDiagnostics() => _diagnosticController.stream;
+
+  Stream<String> watchLivePuttState() => _livePuttStateController.stream;
 
   Future<void> setTransportMode(TransportMode mode) async {
     if (_transportMode == mode) {
@@ -176,9 +186,13 @@ class AppController {
     await _transportStateSubscription?.cancel();
 
     _connectionStateController.add(transport.connectionState);
-    _transportStateSubscription = transport.stateStream.listen(
-      _connectionStateController.add,
-    );
+    _transportStateSubscription = transport.stateStream.listen((state) {
+      _connectionStateController.add(state);
+      if (state == BleConnectionState.disconnected) {
+        _livePuttState = 'Idle';
+        _livePuttStateController.add(_livePuttState);
+      }
+    });
     _transportDataSubscription = transport.dataStream.listen(
       _handleRawNotification,
     );
@@ -188,6 +202,13 @@ class AppController {
     final receivedAtMs = DateTime.now().millisecondsSinceEpoch;
 
     try {
+      final liveState = _decodeLiveState(bytes);
+      if (liveState != null) {
+        _livePuttState = liveState;
+        _livePuttStateController.add(liveState);
+        return;
+      }
+
       final fragment = _codec.decodeFragment(bytes);
       final reassembled = _reassembler.addFragment(fragment);
 
@@ -196,6 +217,13 @@ class AppController {
       }
 
       if (reassembled == null) {
+        return;
+      }
+
+      if (reassembled.messageType == BleContract.cameraMessageType) {
+        _diagnosticController.add(
+          'Camera burst received (${reassembled.payload.length} bytes).',
+        );
         return;
       }
 
@@ -259,6 +287,36 @@ class AppController {
     await _connectionStateController.close();
     await _syncStatusController.close();
     await _diagnosticController.close();
+    await _livePuttStateController.close();
+  }
+
+  String? _decodeLiveState(Uint8List bytes) {
+    final ascii = utf8.decode(bytes, allowMalformed: true).trim();
+    if (!ascii.startsWith('STATE:')) {
+      return null;
+    }
+
+    final rawState = ascii.substring('STATE:'.length).trim();
+    switch (rawState) {
+      case 'IDLE':
+        return 'Idle';
+      case 'READY':
+        return 'Ready to Putt';
+      case 'BACKSTROKE':
+        return 'Backstroke';
+      case 'FORWARD':
+        return 'Forward Stroke';
+      case 'IMPACT':
+        return 'Impact';
+      case 'FOLLOW_THROUGH':
+        return 'Follow Through';
+      case 'RESULT_READY':
+        return 'Stroke Complete';
+      case 'ABORTED':
+        return 'Window Aborted';
+      default:
+        return rawState;
+    }
   }
 }
 

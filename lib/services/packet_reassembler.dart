@@ -17,9 +17,14 @@ class ReassemblyDiagnostic {
 
 class ReassembledPacket {
   final int strokeId;
+  final int messageType;
   final Uint8List payload;
 
-  const ReassembledPacket({required this.strokeId, required this.payload});
+  const ReassembledPacket({
+    required this.strokeId,
+    required this.messageType,
+    required this.payload,
+  });
 }
 
 class PacketReassembler {
@@ -40,24 +45,27 @@ class PacketReassembler {
     final timestamp = now ?? DateTime.now();
     purgeExpired(now: timestamp);
 
-    if (fragment.messageType != BleContract.strokeMessageType) {
-      _diagnostics.add(
-        ReassemblyDiagnostic(
-          strokeId: fragment.strokeId,
-          code: 'unsupported_message_type',
-          message: 'Unsupported message type ${fragment.messageType}.',
-        ),
-      );
-      return null;
-    }
-
     final buffer = _buffers.putIfAbsent(
       fragment.strokeId,
       () => _FragmentBuffer(
+        messageType: fragment.messageType,
         expectedCount: fragment.fragmentCount,
         firstSeenAt: timestamp,
       ),
     );
+
+    if (buffer.messageType != fragment.messageType) {
+      _buffers.remove(fragment.strokeId);
+      _diagnostics.add(
+        ReassemblyDiagnostic(
+          strokeId: fragment.strokeId,
+          code: 'message_type_mismatch',
+          message:
+              'Message type changed mid-stream for packet ${fragment.strokeId}.',
+        ),
+      );
+      return null;
+    }
 
     if (buffer.expectedCount != fragment.fragmentCount) {
       _buffers.remove(fragment.strokeId);
@@ -124,6 +132,7 @@ class PacketReassembler {
     _buffers.remove(fragment.strokeId);
     return ReassembledPacket(
       strokeId: fragment.strokeId,
+      messageType: fragment.messageType,
       payload: bytes.toBytes(),
     );
   }
@@ -165,11 +174,16 @@ class PacketReassembler {
 }
 
 class _FragmentBuffer {
+  final int messageType;
   final int expectedCount;
   final DateTime firstSeenAt;
   final Map<int, Uint8List> fragments = <int, Uint8List>{};
   DateTime lastSeenAt;
 
-  _FragmentBuffer({required this.expectedCount, required this.firstSeenAt})
+  _FragmentBuffer({
+    required this.messageType,
+    required this.expectedCount,
+    required this.firstSeenAt,
+  })
     : lastSeenAt = firstSeenAt;
 }

@@ -6,7 +6,6 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <Adafruit_BNO08x.h>
-#include "src/camera_bridge.h"
 
 /*
  * PutterIQ ESP32-S3 firmware
@@ -29,26 +28,8 @@ static const int PIN_I2C_SCL = 5;
 static const int PIN_PIEZO_1 = 6;
 static const int PIN_READY_BUTTON = 7;
 static const int PIN_PIEZO_3 = 8;
-
-static const int PIN_CAM_VSYNC = 9;
-static const int PIN_CAM_PWDN = 10;
-static const int PIN_CAM_HSYNC = 11;
-static const int PIN_CAM_D7 = 12;
-static const int PIN_CAM_XCLK = 13;
-static const int PIN_CAM_D6 = 14;
-static const int PIN_CAM_RST = 15;
-static const int PIN_CAM_STROBE = 16;
 static const int PIN_IMU_INT = 17;
 static const int PIN_IMU_RST = 18;
-static const int PIN_CAM_D5 = 21;
-static const int PIN_CAM_SDA = 4;
-static const int PIN_CAM_SCL = 5;
-static const int PIN_CAM_D4 = 40;
-static const int PIN_CAM_D0 = 41;
-static const int PIN_CAM_D3 = 42;
-static const int PIN_CAM_D1 = 2;
-static const int PIN_CAM_D2 = 1;
-static const int PIN_CAM_PCLK = 39;
 
 // ---------------------------------------------------------------------------
 // BLE protocol contract shared with the Flutter app
@@ -65,7 +46,6 @@ static const uint16_t BLE_PREFERRED_MTU = 247;
 static const uint16_t FRAGMENT_MAGIC = 0xB17E;
 static const uint8_t PROTOCOL_VERSION = 1;
 static const uint8_t MESSAGE_TYPE_STROKE = 0x01;
-static const uint8_t MESSAGE_TYPE_CAMERA = 0x02;
 
 static const uint8_t COMMAND_ATTACH_SESSION = 0x01;
 static const uint8_t COMMAND_CLEAR_SESSION = 0x02;
@@ -82,7 +62,6 @@ static const size_t RAW_STROKE_HEADER_LENGTH = 30;
 static const size_t IMU_CHANNEL_COUNT = 10;
 static const size_t PIEZO_CHANNEL_COUNT = 2;
 static const size_t MAX_FRAGMENT_PAYLOAD_BYTES = 180;
-static const size_t MAX_CAMERA_PACKET_BYTES = 32768;
 
 // ---------------------------------------------------------------------------
 // BNO configuration
@@ -295,9 +274,7 @@ bool bleSessionBound = false;
 bool bleClientConnected = false;
 
 uint8_t rawPacketBuffer[MAX_RAW_PACKET_BYTES];
-uint8_t cameraPacketBuffer[MAX_CAMERA_PACKET_BYTES];
 uint8_t fragmentBuffer[MAX_FRAGMENT_BYTES];
-CameraBridge cameraBridge;
 
 BLEServer *bleServer = nullptr;
 BLECharacteristic *notifyCharacteristic = nullptr;
@@ -431,27 +408,6 @@ static void writeUint32LE(uint8_t *buffer, size_t offset, uint32_t value) {
   buffer[offset + 1] = (uint8_t)((value >> 8) & 0xFF);
   buffer[offset + 2] = (uint8_t)((value >> 16) & 0xFF);
   buffer[offset + 3] = (uint8_t)((value >> 24) & 0xFF);
-}
-
-static CameraBridgePins buildCameraPins() {
-  CameraBridgePins pins = {};
-  pins.pin_d0 = PIN_CAM_D0;
-  pins.pin_d1 = PIN_CAM_D1;
-  pins.pin_d2 = PIN_CAM_D2;
-  pins.pin_d3 = PIN_CAM_D3;
-  pins.pin_d4 = PIN_CAM_D4;
-  pins.pin_d5 = PIN_CAM_D5;
-  pins.pin_d6 = PIN_CAM_D6;
-  pins.pin_d7 = PIN_CAM_D7;
-  pins.pin_xclk = PIN_CAM_XCLK;
-  pins.pin_pclk = PIN_CAM_PCLK;
-  pins.pin_vsync = PIN_CAM_VSYNC;
-  pins.pin_href = PIN_CAM_HSYNC;
-  pins.pin_sccb_sda = PIN_CAM_SDA;
-  pins.pin_sccb_scl = PIN_CAM_SCL;
-  pins.pin_pwdn = PIN_CAM_PWDN;
-  pins.pin_reset = PIN_CAM_RST;
-  return pins;
 }
 
 static uint32_t readUint32LE(const uint8_t *buffer, size_t offset) {
@@ -1007,50 +963,6 @@ static void sendStrokeCaptureOverBle() {
   Serial.println(" BLE fragments");
 }
 
-static void sendCameraBurstOverBle() {
-  if (!cameraBridge.hasReadyBurst()) {
-    return;
-  }
-
-  if (!bleClientConnected || notifyCharacteristic == nullptr) {
-    return;
-  }
-
-  const uint32_t packetId = nextPacketId++;
-  const uint32_t sessionId = activeBleSessionId;
-  const size_t packetLength = cameraBridge.buildBlePayload(
-      cameraPacketBuffer, sizeof(cameraPacketBuffer), packetId, sessionId);
-  if (packetLength == 0) {
-    Serial.println("Failed to build camera burst payload");
-    cameraBridge.clearReadyBurst();
-    return;
-  }
-
-  const uint16_t fragmentCount =
-      (uint16_t)((packetLength + MAX_FRAGMENT_PAYLOAD_BYTES - 1) /
-                 MAX_FRAGMENT_PAYLOAD_BYTES);
-
-  for (uint16_t fragmentIndex = 0; fragmentIndex < fragmentCount;
-       fragmentIndex++) {
-    const size_t start = fragmentIndex * MAX_FRAGMENT_PAYLOAD_BYTES;
-    const size_t remaining = packetLength - start;
-    const uint16_t chunkLength =
-        (uint16_t)min((size_t)MAX_FRAGMENT_PAYLOAD_BYTES, remaining);
-    sendFragment(MESSAGE_TYPE_CAMERA, packetId, fragmentIndex, fragmentCount,
-                 cameraPacketBuffer + start, chunkLength);
-    delay(20);
-  }
-
-  Serial.print("Notified camera burst packet ");
-  Serial.print(packetId);
-  Serial.print(" in ");
-  Serial.print(fragmentCount);
-  Serial.print(" BLE fragments with ");
-  Serial.print(cameraBridge.frameCount());
-  Serial.println(" frames");
-  cameraBridge.clearReadyBurst();
-}
-
 static void sendWaitingForPuttOverBle() {
   if (!bleClientConnected || notifyCharacteristic == nullptr) {
     return;
@@ -1248,7 +1160,6 @@ static void armReadyWindow() {
   putt.ready_pressed_ms = millis();
   putt.previous_pitch_delta_deg = 0.0f;
   putt.peak_pitch_delta_deg = 0.0f;
-  cameraBridge.trigger();
 
   Serial.println("Ready window armed");
 }
@@ -1699,7 +1610,6 @@ void setup() {
   }
 
   beginBle();
-  cameraBridge.begin(buildCameraPins());
   resetStrokeCapture();
   resetPuttSession();
   activeBleSessionId = 1;
@@ -1708,7 +1618,6 @@ void setup() {
 
 void loop() {
   processBnoEvents();
-  cameraBridge.update();
   handleReadyButton();
   handleSerialArmCommand();
 
@@ -1739,7 +1648,6 @@ void loop() {
   }
 
   updatePuttStateMachine();
-  sendCameraBurstOverBle();
 
   const uint32_t now_ms = millis();
 

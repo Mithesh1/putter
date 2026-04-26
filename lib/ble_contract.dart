@@ -15,6 +15,7 @@ class BleContract {
   static const int fragmentMagic = 0xB17E;
   static const int protocolVersion = 1;
   static const int strokeMessageType = 0x01;
+  static const int cameraMessageType = 0x02;
 
   static const int imuEncodingInt16Scaled = 1;
   static const int piezoEncodingInt16Raw = 1;
@@ -24,7 +25,7 @@ class BleContract {
   static const int defaultImuSampleCount = 100;
 
   static const int defaultPiezoSampleRateHz = 2000;
-  static const int defaultPiezoChannels = 3;
+  static const int defaultPiezoChannels = 2;
   static const int defaultPiezoSampleCount = 32;
 
   static const int accelScale = 100;
