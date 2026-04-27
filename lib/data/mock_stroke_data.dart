@@ -94,6 +94,11 @@ RawStrokePacket generateMockRawStrokePacket({
   final seed = (sessionId * 100003) ^ (packetId * 7919) ^ (piezoChannels * 97);
   final random = Random(seed);
   final impactImuIndex = max(12, (imuSampleCount * 0.58).round());
+  final transitionImuIndex = max(6, impactImuIndex - 16);
+  final followThroughEndImuIndex = min(
+    imuSampleCount - 1,
+    impactImuIndex + 14,
+  );
   final impactOffsetMs = ((impactImuIndex * 1000) / imuSampleRateHz).round();
   final impactPiezoIndex = ((impactOffsetMs * piezoSampleRateHz) / 1000)
       .round()
@@ -102,15 +107,20 @@ RawStrokePacket generateMockRawStrokePacket({
 
   final rawImu = <double>[];
   for (var sampleIndex = 0; sampleIndex < imuSampleCount; sampleIndex++) {
-    final beforeImpact = sampleIndex < impactImuIndex;
+    final inBackstroke = sampleIndex < transitionImuIndex;
+    final inForwardStroke =
+        sampleIndex >= transitionImuIndex &&
+        sampleIndex <= followThroughEndImuIndex;
     final distanceFromImpact = sampleIndex - impactImuIndex;
     final swingEnvelope = exp(-pow(distanceFromImpact / 14.0, 2));
 
-    final gx = beforeImpact
-        ? -1.6 * swingEnvelope -
-              (sampleIndex > impactImuIndex - 18 ? 0.15 : 0.0)
-        : 2.2 * swingEnvelope;
-    final gy = 0.08 * sin(sampleIndex / 7.0);
+    final gx = 0.15 * sin(sampleIndex / 6.0);
+    final gy = inBackstroke
+        ? -28.0 * exp(-pow((sampleIndex - transitionImuIndex) / 10.0, 2))
+        : inForwardStroke
+        ? 18.0 * exp(-pow(distanceFromImpact / 9.0, 2)) +
+              (sampleIndex > impactImuIndex ? 4.0 : 0.0)
+        : -6.0 * exp(-pow((sampleIndex - followThroughEndImuIndex) / 4.5, 2));
     final gzBase = impactMode == 0
         ? 5.5
         : impactMode == 1
@@ -118,9 +128,9 @@ RawStrokePacket generateMockRawStrokePacket({
         : 1.2;
     final gz = gzBase * exp(-pow(distanceFromImpact / 10.0, 2));
 
-    final ax = beforeImpact
-        ? 0.12 * sin(sampleIndex / 8.0)
-        : 2.5 * swingEnvelope + (impactMode == 1 ? 0.22 : -0.05);
+    final ax = inForwardStroke
+        ? 2.5 * swingEnvelope + (impactMode == 1 ? 0.22 : -0.05)
+        : 0.10 * sin(sampleIndex / 8.0);
     final ay = (impactMode - 1) * 0.18 + 0.04 * cos(sampleIndex / 9.0);
     final az = 0.10 * sin(sampleIndex / 5.0);
 

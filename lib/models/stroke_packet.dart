@@ -172,6 +172,8 @@ class StrokeMetrics {
   final String setupStabilityLabel;
   final double smoothnessScore;
   final String rollStatus;
+  final int impactImuOffsetMs;
+  final int impactPiezoOffsetMs;
   final StrokeEventMarkers eventMarkers;
   final StrokeQualityFlags qualityFlags;
 
@@ -205,6 +207,8 @@ class StrokeMetrics {
     required this.setupStabilityLabel,
     required this.smoothnessScore,
     required this.rollStatus,
+    required this.impactImuOffsetMs,
+    required this.impactPiezoOffsetMs,
     required this.eventMarkers,
     required this.qualityFlags,
   });
@@ -243,6 +247,8 @@ class StrokeMetrics {
       setupStabilityLabel: '0%',
       smoothnessScore: 0.0,
       rollStatus: 'Unavailable',
+      impactImuOffsetMs: 0,
+      impactPiezoOffsetMs: 0,
       eventMarkers: StrokeEventMarkers(
         setupMs: 0,
         motionStartMs: 0,
@@ -289,6 +295,8 @@ class StrokeMetrics {
       'setupStabilityLabel': setupStabilityLabel,
       'smoothnessScore': smoothnessScore,
       'rollStatus': rollStatus,
+      'impactImuOffsetMs': impactImuOffsetMs,
+      'impactPiezoOffsetMs': impactPiezoOffsetMs,
       'eventMarkers': eventMarkers.toJson(),
       'qualityFlags': qualityFlags.toJson(),
     };

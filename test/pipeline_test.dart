@@ -212,6 +212,23 @@ void main() {
         throwsA(isA<FormatException>()),
       );
     });
+
+    test('processing exposes pulse-derived impact offsets for charts', () {
+      final packet = generateMockRawStrokePacket(
+        packetId: 8,
+        sessionId: 42,
+        codec: codec,
+      );
+
+      final metrics = processStrokePacket(packet, codec: codec);
+
+      expect(metrics.impactImuOffsetMs, greaterThan(0));
+      expect(metrics.impactPiezoOffsetMs, greaterThan(0));
+      expect(
+        metrics.eventMarkers.impactMs,
+        equals(packet.captureStartMs + metrics.impactImuOffsetMs),
+      );
+    });
   });
 
   group('repository and controller', () {

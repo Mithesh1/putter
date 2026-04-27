@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:convert';
 
 import 'package:designcode/ble_contract.dart';
 import 'package:designcode/data/mock_stroke_data.dart';
@@ -109,6 +110,16 @@ class MockBleService implements BleTransport {
     }
 
     _ensureEmitter();
+  }
+
+  @override
+  Future<void> sendLatencyPing(int pingId) async {
+    if (_connectionState != BleConnectionState.connected) {
+      return;
+    }
+
+    await Future<void>.delayed(const Duration(milliseconds: 18));
+    _dataController.add(Uint8List.fromList(utf8.encode('PING:$pingId')));
   }
 
   Future<void> emitNextStroke({

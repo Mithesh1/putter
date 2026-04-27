@@ -4,6 +4,18 @@ import 'package:designcode/models/stroke_packet.dart';
 import 'package:designcode/packet_codec.dart';
 
 const double _gravityMps2 = 9.80665;
+const double _backstrokeThresholdDps = 20.0;
+const double _forwardStrokeThresholdDps = -10.0;
+const double _followThroughEndThresholdDps = -1.0;
+const double _centerImpactRatioThreshold = 0.12;
+const double _accelImpactMinDeltaG = 0.35;
+const double _accelImpactMinScore = 4.0;
+const double _piezoImpactMinDelta = 12.0;
+const double _piezoImpactAbsoluteThreshold = 300.0;
+const double _piezoContactAverageDelta = 30.0;
+const int _piezoContactWindowRadius = 5;
+const int _motionConfirmFrames = 3;
+const int _followThroughConfirmFrames = 2;
 
 class ImuSample {
   final double ax;
@@ -64,17 +76,35 @@ StrokeMetrics processStrokePacket(
   }
 
   final piezoChannels = codec.splitPiezoChannels(packet);
+  final calibrationIdx = packet.imuSampleCount > 0
+      ? packet.reserved.clamp(0, packet.imuSampleCount - 1)
+      : 0;
+  final packetImpactImuIdx = packet.impactOffsetMs > 0
+      ? ((packet.impactOffsetMs * imuHz) / 1000.0).round().clamp(
+          0,
+          imuSamples.length - 1,
+        )
+      : 0;
+  final motion = _segmentMotion(imuSamples);
+  final accelImpact = _findAccelImpact(
+    imuSamples,
+    transitionIdx: motion.transitionIdx,
+    packetImpactIdx: packetImpactImuIdx,
+  );
+  final impactImuIdx = accelImpact.impactIdx;
+  final segmentation = _segmentStroke(
+    imuSamples,
+    impactImuIdx,
+    motionStartIdx: motion.motionStartIdx,
+    transitionIdx: motion.transitionIdx,
+  );
+  final impactPiezoIdx = ((impactImuIdx * piezoHz) / imuHz).round();
   final piezo = _processPiezo(
     piezoChannels.isNotEmpty ? piezoChannels[0] : const <int>[],
     piezoChannels.length > 1 ? piezoChannels[1] : const <int>[],
-    piezoChannels.length > 2 ? piezoChannels[2] : const <int>[],
+    impactPiezoIdx,
+    impactFound: accelImpact.found,
   );
-  final impactImuIdx = (piezo.impactIdx * imuHz / piezoHz).round().clamp(
-    0,
-    imuSamples.length - 1,
-  );
-
-  final segmentation = _segmentStroke(imuSamples, impactImuIdx, imuHz: imuHz);
   final timing = _computeTiming(
     motionStartIdx: segmentation.motionStartIdx,
     transitionIdx: segmentation.transitionIdx,
@@ -92,6 +122,7 @@ StrokeMetrics processStrokePacket(
 
   final face = _computeFaceMetrics(
     samples: imuSamples,
+    calibrationIdx: calibrationIdx,
     motionStartIdx: segmentation.motionStartIdx,
     transitionIdx: segmentation.transitionIdx,
     impactIdx: impactImuIdx,
@@ -118,6 +149,7 @@ StrokeMetrics processStrokePacket(
   final speedMps = _computeSpeedMps(
     samples: imuSamples,
     motionStartIdx: segmentation.motionStartIdx,
+    transitionIdx: segmentation.transitionIdx,
     impactIdx: impactImuIdx,
     hasQuaternionData: imuData.hasQuaternionData,
     dominantGyroAxis: segmentation.dominantGyroAxis,
@@ -131,11 +163,12 @@ StrokeMetrics processStrokePacket(
   );
 
   final impactMsFromIdx = _idxToMs(impactImuIdx, imuHz);
-  final impactMs = packet.impactOffsetMs > 0
-      ? packet.impactTimeMs
-      : impactMsFromIdx;
+  final imuStartMs = packet.captureStartMs -
+      (imuHz > 0 ? ((calibrationIdx * 1000.0) / imuHz).round() : 0);
+  final impactMs = imuStartMs + impactMsFromIdx;
   final offsetMs = impactMs - impactMsFromIdx;
-  final setupMs = packet.captureStartMs;
+  final impactPiezoOffsetMs =
+      piezoHz > 0 ? _idxToMs(piezo.impactIdx, piezoHz) : 0;
 
   return StrokeMetrics(
     faceAngleDeg: face.changeDeg,
@@ -169,8 +202,10 @@ StrokeMetrics processStrokePacket(
     setupStabilityLabel: '${setupStability.toStringAsFixed(0)}%',
     smoothnessScore: smoothnessScore,
     rollStatus: 'Unavailable',
+    impactImuOffsetMs: impactMsFromIdx,
+    impactPiezoOffsetMs: impactPiezoOffsetMs,
     eventMarkers: StrokeEventMarkers(
-      setupMs: setupMs,
+      setupMs: 0,
       motionStartMs: offsetMs + _idxToMs(segmentation.motionStartIdx, imuHz),
       transitionMs: offsetMs + _idxToMs(segmentation.transitionIdx, imuHz),
       impactMs: impactMs,
@@ -178,7 +213,7 @@ StrokeMetrics processStrokePacket(
           offsetMs + _idxToMs(segmentation.followThroughEndIdx, imuHz),
     ),
     qualityFlags: StrokeQualityFlags(
-      weakImpact: piezo.weakImpact,
+      weakImpact: !accelImpact.found || piezo.weakImpact,
       poorSegmentation: segmentation.poorSegmentation || tempo.poorSegmentation,
       quaternionMissing: !imuData.hasQuaternionData,
     ),
@@ -227,110 +262,149 @@ _ParsedImuData _parseImuSamples(List<double> rawImu, int imuChannels) {
 }
 
 class _PiezoResult {
-  final int impactIdx;
   final bool weakImpact;
   final String impactLabel;
   final double impactStrength;
+  final int impactIdx;
 
   const _PiezoResult({
-    required this.impactIdx,
     required this.weakImpact,
     required this.impactLabel,
     required this.impactStrength,
+    required this.impactIdx,
   });
 }
 
-_PiezoResult _processPiezo(List<int> p1, List<int> p2, List<int> p3) {
-  final d1 = _analyzePiezoChannel(p1);
-  final d2 = _analyzePiezoChannel(p2);
-  final d3 = _analyzePiezoChannel(p3);
-
-  var impactIdx = d1.peakIdx;
-  var globalPeak = d1.peak;
-  var globalThreshold = d1.threshold;
-
-  if (d2.peak > globalPeak) {
-    globalPeak = d2.peak;
-    impactIdx = d2.peakIdx;
-    globalThreshold = d2.threshold;
-  }
-  if (d3.peak > globalPeak) {
-    globalPeak = d3.peak;
-    impactIdx = d3.peakIdx;
-    globalThreshold = d3.threshold;
+_PiezoResult _processPiezo(
+  List<int> toePiezo,
+  List<int> heelPiezo,
+  int impactIdx, {
+  required bool impactFound,
+}) {
+  if (toePiezo.isEmpty && heelPiezo.isEmpty) {
+    return const _PiezoResult(
+      weakImpact: true,
+      impactLabel: 'Unknown',
+      impactStrength: 0.0,
+      impactIdx: 0,
+    );
   }
 
-  final weakImpact = globalPeak < globalThreshold;
+  final toeAverage = toePiezo.isEmpty
+      ? 0.0
+      : _mean(toePiezo.map((value) => value.toDouble()).toList(growable: false));
+  final heelAverage = heelPiezo.isEmpty
+      ? 0.0
+      : _mean(
+          heelPiezo.map((value) => value.toDouble()).toList(growable: false),
+        );
+  final maxLength = max(toePiezo.length, heelPiezo.length);
+  if (maxLength <= 0) {
+    return const _PiezoResult(
+      weakImpact: true,
+      impactLabel: 'Unknown',
+      impactStrength: 0.0,
+      impactIdx: 0,
+    );
+  }
+
+  final expectedIdx = impactIdx.clamp(0, maxLength - 1);
+  final searchRadius = 12;
+  final searchStart = max(0, expectedIdx - searchRadius);
+  final searchEnd = min(maxLength - 1, expectedIdx + searchRadius);
+  var bestImpactIdx = expectedIdx;
+  var bestImpactStrength = -1.0;
+  var bestToeDelta = 0.0;
+  var bestHeelDelta = 0.0;
+  var bestAbsolutePeak = double.negativeInfinity;
+
+  for (var idx = searchStart; idx <= searchEnd; idx++) {
+    final toeRaw = idx < toePiezo.length ? toePiezo[idx].toDouble() : 0.0;
+    final heelRaw = idx < heelPiezo.length ? heelPiezo[idx].toDouble() : 0.0;
+    final toeDelta = idx < toePiezo.length
+        ? max(0.0, toeRaw - toeAverage)
+        : 0.0;
+    final heelDelta = idx < heelPiezo.length
+        ? max(0.0, heelRaw - heelAverage)
+        : 0.0;
+    final absolutePeak = max(toeRaw, heelRaw);
+    if (absolutePeak >= _piezoImpactAbsoluteThreshold &&
+        absolutePeak > bestAbsolutePeak) {
+      bestAbsolutePeak = absolutePeak;
+      bestImpactStrength = max(toeDelta, heelDelta);
+      bestImpactIdx = idx;
+      bestToeDelta = toeDelta;
+      bestHeelDelta = heelDelta;
+      continue;
+    }
+    if (bestAbsolutePeak >= _piezoImpactAbsoluteThreshold) {
+      continue;
+    }
+    final combinedStrength = max(toeDelta, heelDelta);
+    if (combinedStrength > bestImpactStrength) {
+      bestImpactStrength = combinedStrength;
+      bestImpactIdx = idx;
+      bestToeDelta = toeDelta;
+      bestHeelDelta = heelDelta;
+    }
+  }
+
+  final impactStrength = bestImpactStrength < 0.0 ? 0.0 : bestImpactStrength;
+  final weakImpact = bestAbsolutePeak < _piezoImpactAbsoluteThreshold &&
+      impactStrength < _piezoImpactMinDelta;
+
+  final windowStart = max(0, bestImpactIdx - _piezoContactWindowRadius);
+  final windowEnd = min(maxLength - 1, bestImpactIdx + _piezoContactWindowRadius);
+  var toeWindowTotal = 0.0;
+  var heelWindowTotal = 0.0;
+  var windowSamples = 0;
+
+  for (var idx = windowStart; idx <= windowEnd; idx++) {
+    final toeRaw = idx < toePiezo.length ? toePiezo[idx].toDouble() : 0.0;
+    final heelRaw = idx < heelPiezo.length ? heelPiezo[idx].toDouble() : 0.0;
+    toeWindowTotal += max(0.0, toeRaw - toeAverage);
+    heelWindowTotal += max(0.0, heelRaw - heelAverage);
+    windowSamples++;
+  }
+
+  final toeWindowAverage =
+      windowSamples == 0 ? 0.0 : toeWindowTotal / windowSamples;
+  final heelWindowAverage =
+      windowSamples == 0 ? 0.0 : heelWindowTotal / windowSamples;
 
   String impactLabel;
-  if (p3.isNotEmpty) {
-    if (d2.peak >= d1.peak && d2.peak >= d3.peak) {
-      impactLabel = 'Center';
-    } else if (d1.peak >= d3.peak) {
-      impactLabel = 'Heel';
-    } else {
-      impactLabel = 'Toe';
-    }
+  if (!impactFound) {
+    impactLabel = 'Unknown';
+  } else if (weakImpact) {
+    impactLabel = 'Center';
+  } else if (toeWindowAverage > heelWindowAverage + _piezoContactAverageDelta) {
+    impactLabel = 'Toe';
+  } else if (heelWindowAverage > toeWindowAverage + _piezoContactAverageDelta) {
+    impactLabel = 'Heel';
   } else {
-    final rho = (d2.peak - d1.peak) / (d2.peak + d1.peak + 1e-6);
-    if (rho.abs() < 0.12) {
-      impactLabel = 'Center';
-    } else if (rho < -0.12) {
-      impactLabel = 'Heel';
-    } else {
-      impactLabel = 'Toe';
-    }
+    final rho =
+        (bestToeDelta - bestHeelDelta) / (bestToeDelta + bestHeelDelta + 1e-6);
+    impactLabel = rho.abs() < _centerImpactRatioThreshold
+        ? 'Center'
+        : (rho > 0.0 ? 'Toe' : 'Heel');
   }
 
   return _PiezoResult(
-    impactIdx: impactIdx,
     weakImpact: weakImpact,
     impactLabel: impactLabel,
-    impactStrength: globalPeak,
+    impactStrength: impactStrength,
+    impactIdx: bestImpactIdx,
   );
 }
 
-class _PiezoChannelAnalysis {
-  final double peak;
-  final int peakIdx;
-  final double threshold;
+class _MotionSegmentation {
+  final int motionStartIdx;
+  final int transitionIdx;
 
-  const _PiezoChannelAnalysis({
-    required this.peak,
-    required this.peakIdx,
-    required this.threshold,
+  const _MotionSegmentation({
+    required this.motionStartIdx,
+    required this.transitionIdx,
   });
-}
-
-_PiezoChannelAnalysis _analyzePiezoChannel(List<int> channel) {
-  if (channel.isEmpty) {
-    return const _PiezoChannelAnalysis(peak: 0.0, peakIdx: 0, threshold: 20.0);
-  }
-
-  final n = channel.length;
-  final preCount = max(1, (n * 0.2).round());
-  final pre = channel.take(preCount).map((e) => e.toDouble()).toList();
-
-  final baseline = _mean(pre);
-  var peak = 0.0;
-  var peakIdx = 0;
-
-  for (var i = 0; i < n; i++) {
-    final v = (channel[i] - baseline).abs();
-    if (v > peak) {
-      peak = v;
-      peakIdx = i;
-    }
-  }
-
-  final noiseStd = _std(pre);
-  final threshold = max(20.0, 5.0 * noiseStd);
-
-  return _PiezoChannelAnalysis(
-    peak: peak,
-    peakIdx: peakIdx,
-    threshold: threshold,
-  );
 }
 
 class _SegmentationResult {
@@ -351,99 +425,153 @@ class _SegmentationResult {
   });
 }
 
+_MotionSegmentation _segmentMotion(List<ImuSample> samples) {
+  final n = samples.length;
+  final gy = samples.map((s) => s.gy).toList();
+  final motionStart = _findConsecutiveIndex(
+    gy,
+    start: 0,
+    endInclusive: n - 1,
+    predicate: (value) => value >= _backstrokeThresholdDps,
+    requiredFrames: _motionConfirmFrames,
+  );
+  final transition = _findConsecutiveIndex(
+    gy,
+    start: max(0, motionStart),
+    endInclusive: n - 1,
+    predicate: (value) => value <= _forwardStrokeThresholdDps,
+    requiredFrames: _motionConfirmFrames,
+  );
+
+  return _MotionSegmentation(
+    motionStartIdx: motionStart < 0 ? 0 : motionStart,
+    transitionIdx: transition < 0 ? max(0, n ~/ 2) : transition,
+  );
+}
+
+class _AccelImpactResult {
+  final int impactIdx;
+  final bool found;
+
+  const _AccelImpactResult({
+    required this.impactIdx,
+    required this.found,
+  });
+}
+
+_AccelImpactResult _findAccelImpact(
+  List<ImuSample> samples, {
+  required int transitionIdx,
+  required int packetImpactIdx,
+}) {
+  if (samples.isEmpty) {
+    return const _AccelImpactResult(impactIdx: 0, found: false);
+  }
+
+  final start = transitionIdx.clamp(0, samples.length - 1);
+  final end = _findConsecutiveIndex(
+    samples.map((s) => s.gy).toList(growable: false),
+    start: min(samples.length - 1, start + 1),
+    endInclusive: samples.length - 1,
+    predicate: (value) => value >= _followThroughEndThresholdDps,
+    requiredFrames: _followThroughConfirmFrames,
+  );
+  final searchEnd = end < 0 ? (samples.length - 1) : max(start, end - 1);
+  final window = samples.sublist(start, searchEnd + 1);
+  if (window.isEmpty) {
+    return _AccelImpactResult(
+      impactIdx: packetImpactIdx.clamp(0, samples.length - 1),
+      found: false,
+    );
+  }
+
+  final meanAx = _mean(window.map((sample) => sample.ax).toList(growable: false));
+  final meanAy = _mean(window.map((sample) => sample.ay).toList(growable: false));
+  final meanAz = _mean(window.map((sample) => sample.az).toList(growable: false));
+  final stdAx = max(0.05, _std(window.map((sample) => sample.ax).toList(growable: false)));
+  final stdAy = max(0.05, _std(window.map((sample) => sample.ay).toList(growable: false)));
+  final stdAz = max(0.05, _std(window.map((sample) => sample.az).toList(growable: false)));
+
+  var bestIdx = packetImpactIdx.clamp(start, searchEnd);
+  var bestScore = 0.0;
+  var bestDelta = 0.0;
+
+  for (var i = start; i <= searchEnd; i++) {
+    final sample = samples[i];
+    final dx = (sample.ax - meanAx).abs();
+    final dy = (sample.ay - meanAy).abs();
+    final dz = (sample.az - meanAz).abs();
+    final score = max(dx / stdAx, max(dy / stdAy, dz / stdAz));
+    final delta = max(dx, max(dy, dz));
+    if (score > bestScore || (score == bestScore && delta > bestDelta)) {
+      bestScore = score;
+      bestDelta = delta;
+      bestIdx = i;
+    }
+  }
+
+  final found = bestScore >= _accelImpactMinScore && bestDelta >= _accelImpactMinDeltaG;
+  return _AccelImpactResult(
+    impactIdx: bestIdx,
+    found: found,
+  );
+}
+
 _SegmentationResult _segmentStroke(
   List<ImuSample> samples,
   int impactIdx, {
-  required double imuHz,
+  required int motionStartIdx,
+  required int transitionIdx,
 }) {
   final n = samples.length;
-  final preImpactEnd = max(1, impactIdx);
-
-  final gx = samples.map((s) => s.gx).toList();
   final gy = samples.map((s) => s.gy).toList();
-  final gz = samples.map((s) => s.gz).toList();
-
-  final rmsX = _rms(gx.sublist(0, preImpactEnd));
-  final rmsY = _rms(gy.sublist(0, preImpactEnd));
-  final rmsZ = _rms(gz.sublist(0, preImpactEnd));
-
-  var dominantAxis = 0;
-  var bestRms = rmsX;
-  if (rmsY > bestRms) {
-    bestRms = rmsY;
-    dominantAxis = 1;
-  }
-  if (rmsZ > bestRms) {
-    dominantAxis = 2;
-  }
-
-  final gDom = dominantAxis == 0
-      ? gx
-      : dominantAxis == 1
-      ? gy
-      : gz;
-
-  final quietCount = max(1, (n * 0.2).round());
-  final quietAbs = gDom.take(quietCount).map((v) => v.abs()).toList();
-  final threshold = _mean(quietAbs) + 3.0 * _std(quietAbs);
-
-  var motionStart = 0;
-  for (var i = 0; i <= impactIdx && i < n; i++) {
-    if (gDom[i].abs() > threshold) {
-      motionStart = i;
-      break;
-    }
-  }
-
-  var transition = motionStart;
-  var hasSignChange = false;
-  for (var i = motionStart + 1; i <= impactIdx && i < n; i++) {
-    final prev = gDom[i - 1];
-    final cur = gDom[i];
-    if ((prev < 0 && cur > 0) || (prev > 0 && cur < 0)) {
-      transition = i;
-      hasSignChange = true;
-    }
-  }
-
-  if (!hasSignChange) {
-    transition = ((motionStart + impactIdx) / 2).round();
-  }
-
-  var followThroughEnd = n - 1;
-  final settleWindow = max(3, (imuHz * 0.05).round());
-  var foundSettle = false;
-
-  for (var i = impactIdx + 1; i + settleWindow < n; i++) {
-    var below = true;
-    for (var j = i; j < i + settleWindow; j++) {
-      if (gDom[j].abs() > threshold) {
-        below = false;
-        break;
-      }
-    }
-    if (below) {
-      followThroughEnd = i;
-      foundSettle = true;
-      break;
-    }
-  }
+  final followThroughEnd = _findConsecutiveIndex(
+    gy,
+    start: min(n - 1, impactIdx + 1),
+    endInclusive: n - 1,
+    predicate: (value) => value >= _followThroughEndThresholdDps,
+    requiredFrames: _followThroughConfirmFrames,
+  );
 
   final poorSegmentation =
-      !hasSignChange ||
-      !foundSettle ||
-      motionStart >= transition ||
-      transition >= impactIdx ||
+      followThroughEnd < 0 ||
+      motionStartIdx >= transitionIdx ||
+      transitionIdx >= impactIdx ||
       impactIdx >= followThroughEnd;
 
   return _SegmentationResult(
-    motionStartIdx: motionStart,
-    transitionIdx: transition,
-    followThroughEndIdx: followThroughEnd,
-    dominantGyroAxis: dominantAxis,
-    gDomSeries: gDom,
+    motionStartIdx: motionStartIdx,
+    transitionIdx: transitionIdx,
+    followThroughEndIdx: followThroughEnd < 0 ? (n - 1) : followThroughEnd,
+    dominantGyroAxis: 1,
+    gDomSeries: gy,
     poorSegmentation: poorSegmentation,
   );
+}
+
+int _findConsecutiveIndex(
+  List<double> values, {
+  required int start,
+  required int endInclusive,
+  required bool Function(double value) predicate,
+  required int requiredFrames,
+}) {
+  if (values.isEmpty || start > endInclusive) {
+    return -1;
+  }
+
+  var consecutive = 0;
+  for (var i = max(0, start); i <= min(endInclusive, values.length - 1); i++) {
+    if (predicate(values[i])) {
+      consecutive++;
+      if (consecutive >= requiredFrames) {
+        return i - requiredFrames + 1;
+      }
+    } else {
+      consecutive = 0;
+    }
+  }
+  return -1;
 }
 
 class _TempoResult {
@@ -520,6 +648,7 @@ class _FaceMetrics {
 
 _FaceMetrics _computeFaceMetrics({
   required List<ImuSample> samples,
+  required int calibrationIdx,
   required int motionStartIdx,
   required int transitionIdx,
   required int impactIdx,
@@ -528,24 +657,27 @@ _FaceMetrics _computeFaceMetrics({
   required double imuHz,
 }) {
   if (hasQuaternionData &&
-      samples[motionStartIdx].hasQuaternion &&
+      samples[calibrationIdx.clamp(0, samples.length - 1)].hasQuaternion &&
       samples[impactIdx].hasQuaternion) {
-    final setupDeg = _faceAngleFromQuaternion(samples.first);
-    final impactDeg = _faceAngleFromQuaternion(samples[impactIdx]);
-    final changeDeg = _wrapDegrees180(impactDeg - setupDeg);
+    final calibrationSample = samples[calibrationIdx.clamp(0, samples.length - 1)];
+    final setupRollDeg = _rollFromQuaternion(calibrationSample);
+    final impactRollDeg = _rollFromQuaternion(samples[impactIdx]);
+    final changeDeg = _wrapDegrees180(impactRollDeg - setupRollDeg);
 
     final start = motionStartIdx.clamp(0, samples.length - 1);
     final end = followThroughEndIdx.clamp(start, samples.length - 1);
     final angles = <double>[];
     for (var i = start; i <= end; i++) {
       if (samples[i].hasQuaternion) {
-        angles.add(_faceAngleFromQuaternion(samples[i]));
+        angles.add(
+          _wrapDegrees180(_rollFromQuaternion(samples[i]) - setupRollDeg),
+        );
       }
     }
 
     return _FaceMetrics(
-      setupDeg: setupDeg,
-      impactDeg: impactDeg,
+      setupDeg: 0.0,
+      impactDeg: changeDeg,
       changeDeg: changeDeg,
       clubRotationDeg: angles.isEmpty
           ? changeDeg.abs()
@@ -616,9 +748,7 @@ _DynamicsResult _computeDynamics({
     );
     peakAngularVelocity = max(
       peakAngularVelocity,
-      sqrt(
-        sample.gx * sample.gx + sample.gy * sample.gy + sample.gz * sample.gz,
-      ),
+      sample.gy.abs(),
     );
   }
 
@@ -631,6 +761,7 @@ _DynamicsResult _computeDynamics({
 double _computeSpeedMps({
   required List<ImuSample> samples,
   required int motionStartIdx,
+  required int transitionIdx,
   required int impactIdx,
   required bool hasQuaternionData,
   required int dominantGyroAxis,
@@ -645,33 +776,79 @@ double _computeSpeedMps({
   if (hasQuaternionData &&
       samples[motionStartIdx].hasQuaternion &&
       samples[impactIdx].hasQuaternion) {
-    var vx = 0.0;
-    var vy = 0.0;
+    final transition = transitionIdx.clamp(motionStartIdx, impactIdx);
+    var forwardVx = 0.0;
+    var forwardVy = 0.0;
+    var peakForwardHorizontalSpeed = 0.0;
+    var axisX = 0.0;
+    var axisY = 0.0;
 
-    for (var i = motionStartIdx; i <= impactIdx && i < samples.length; i++) {
+    for (var i = transition; i <= impactIdx && i < samples.length; i++) {
       final s = samples[i];
       final q = _normalizedQuatFromSample(s);
-
-      final aBody = [
+      final aWorld = _rotateVectorByQuat([
         s.ax * _gravityMps2,
         s.ay * _gravityMps2,
         s.az * _gravityMps2,
-      ];
-      final aWorld = _rotateVectorByQuat(aBody, q);
-
+      ], q);
       final ax = aWorld[0];
       final ay = aWorld[1];
       final azNoG = aWorld[2] - _gravityMps2;
 
-      vx += ax * dt;
-      vy += ay * dt;
+      forwardVx += ax * dt;
+      forwardVy += ay * dt;
+      final horizontalSpeed = sqrt(forwardVx * forwardVx + forwardVy * forwardVy);
+      if (horizontalSpeed > peakForwardHorizontalSpeed) {
+        peakForwardHorizontalSpeed = horizontalSpeed;
+        axisX = forwardVx / horizontalSpeed;
+        axisY = forwardVy / horizontalSpeed;
+      }
 
       if (azNoG.isNaN) {
         return 0.0;
       }
     }
 
-    return sqrt(vx * vx + vy * vy).abs();
+    if (peakForwardHorizontalSpeed < 1e-6) {
+      return 0.0;
+    }
+
+    var projectedBias = 0.0;
+    if (motionStartIdx > 0) {
+      var biasSamples = 0;
+      for (var i = 0; i < motionStartIdx && i < samples.length; i++) {
+        final s = samples[i];
+        if (!s.hasQuaternion) {
+          continue;
+        }
+        final q = _normalizedQuatFromSample(s);
+        final aWorld = _rotateVectorByQuat([
+          s.ax * _gravityMps2,
+          s.ay * _gravityMps2,
+          s.az * _gravityMps2,
+        ], q);
+        projectedBias += (aWorld[0] * axisX) + (aWorld[1] * axisY);
+        biasSamples++;
+      }
+      if (biasSamples > 0) {
+        projectedBias /= biasSamples;
+      }
+    }
+
+    var projectedVelocity = 0.0;
+    for (var i = motionStartIdx; i <= impactIdx && i < samples.length; i++) {
+      final s = samples[i];
+      final q = _normalizedQuatFromSample(s);
+      final aWorld = _rotateVectorByQuat([
+        s.ax * _gravityMps2,
+        s.ay * _gravityMps2,
+        s.az * _gravityMps2,
+      ], q);
+      final projectedAccel = ((aWorld[0] * axisX) + (aWorld[1] * axisY)) - projectedBias;
+      projectedVelocity += projectedAccel * dt;
+    }
+
+    return projectedVelocity.abs();
   }
 
   final axisSeries = dominantGyroAxis == 0
@@ -737,26 +914,60 @@ String _faceAngleLabel(double angleDeg) {
   return '${angleDeg.abs().toStringAsFixed(1)}° $direction';
 }
 
-double _faceAngleFromQuaternion(ImuSample sample) {
+double _rollFromQuaternion(ImuSample sample) {
   final q = _normalizedQuatFromSample(sample);
-  final faceNormal = const [1.0, 0.0, 0.0];
-  final targetLine = const [1.0, 0.0, 0.0];
-  final upVector = const [0.0, 0.0, 1.0];
+  return _orientationFromQuat(q).rollDeg;
+}
 
-  final rotated = _rotateVectorByQuat(faceNormal, q);
-  final faceProj = [rotated[0], rotated[1], 0.0];
-  final norm = _norm3(faceProj);
-  if (norm < 1e-8) {
-    return 0.0;
+class _OrientationAngles {
+  final double yawDeg;
+  final double pitchDeg;
+  final double rollDeg;
+
+  const _OrientationAngles({
+    required this.yawDeg,
+    required this.pitchDeg,
+    required this.rollDeg,
+  });
+}
+
+_OrientationAngles _orientationFromQuat(List<double> q) {
+  final qi = q[0];
+  final qj = q[1];
+  final qk = q[2];
+  final qr = q[3];
+  final qi2 = qi * qi;
+  final qj2 = qj * qj;
+  final qk2 = qk * qk;
+  final qr2 = qr * qr;
+  final denom = qi2 + qj2 + qk2 + qr2;
+  if (denom == 0.0) {
+    return const _OrientationAngles(yawDeg: 0.0, pitchDeg: 0.0, rollDeg: 0.0);
   }
 
-  final faceProjUnit = [faceProj[0] / norm, faceProj[1] / norm, 0.0];
-  final cross = _cross3(targetLine, faceProjUnit);
-  final angleRad = atan2(
-    _dot3(cross, upVector),
-    _dot3(targetLine, faceProjUnit),
+  final yawDeg = atan2(
+        2.0 * (qi * qj + qk * qr),
+        (qi2 - qj2 - qk2 + qr2),
+      ) *
+      180.0 /
+      pi;
+  final pitchDeg = asin(
+        (-2.0 * (qi * qk - qj * qr) / denom).clamp(-1.0, 1.0),
+      ) *
+      180.0 /
+      pi;
+  final rollDeg = atan2(
+        2.0 * (qj * qk + qi * qr),
+        (-qi2 - qj2 + qk2 + qr2),
+      ) *
+      180.0 /
+      pi;
+
+  return _OrientationAngles(
+    yawDeg: yawDeg,
+    pitchDeg: pitchDeg,
+    rollDeg: rollDeg,
   );
-  return angleRad * 180.0 / pi;
 }
 
 double _linearAccelerationMagnitudeMps2(
@@ -884,16 +1095,3 @@ List<double> _rotateVectorByQuat(List<double> v, List<double> q) {
   final qpqInv = _quatMultiply(qp, qInv);
   return [qpqInv[1], qpqInv[2], qpqInv[3]];
 }
-
-double _dot3(List<double> a, List<double> b) =>
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-
-List<double> _cross3(List<double> a, List<double> b) {
-  return [
-    a[1] * b[2] - a[2] * b[1],
-    a[2] * b[0] - a[0] * b[2],
-    a[0] * b[1] - a[1] * b[0],
-  ];
-}
-
-double _norm3(List<double> v) => sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);

@@ -10,6 +10,7 @@ class BleContract {
 
   static const int commandAttachSession = 0x01;
   static const int commandClearSession = 0x02;
+  static const int commandLatencyPing = 0x03;
 
   static const int preferredMtu = 247;
   static const int fragmentMagic = 0xB17E;

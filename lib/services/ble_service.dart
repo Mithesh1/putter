@@ -205,6 +205,27 @@ class BleService implements BleTransport {
     }
   }
 
+  @override
+  Future<void> sendLatencyPing(int pingId) async {
+    final deviceId = _connectedDeviceId;
+    if (deviceId == null || _connectionState != BleConnectionState.connected) {
+      return;
+    }
+
+    final characteristic = QualifiedCharacteristic(
+      serviceId: _serviceUuid,
+      characteristicId: _writeCharacteristicUuid,
+      deviceId: deviceId,
+    );
+    final data = ByteData(5);
+    data.setUint8(0, BleContract.commandLatencyPing);
+    data.setUint32(1, pingId, Endian.little);
+    await _ble.writeCharacteristicWithoutResponse(
+      characteristic,
+      value: data.buffer.asUint8List(),
+    );
+  }
+
   Future<void> subscribeToCharacteristic(String deviceId) async {
     if (_connectionState != BleConnectionState.connected ||
         _connectedDeviceId != deviceId) {

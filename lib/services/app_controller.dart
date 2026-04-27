@@ -51,15 +51,21 @@ class AppController {
       StreamController<String>.broadcast();
   final StreamController<String> _livePuttStateController =
       StreamController<String>.broadcast();
+  final StreamController<String> _bleLatencyController =
+      StreamController<String>.broadcast();
 
   StreamSubscription<Uint8List>? _transportDataSubscription;
   StreamSubscription<BleConnectionState>? _transportStateSubscription;
   StreamSubscription<PracticeSession?>? _activeSessionSubscription;
   StreamSubscription<String>? _syncStatusSubscription;
+  Timer? _latencyPingTimer;
 
   PracticeSession? _activeSession;
   TransportMode _transportMode;
   bool _isInitialized = false;
+  final Map<int, int> _pendingLatencyPings = <int, int>{};
+  int _nextLatencyPingId = 1;
+  int _missedLatencyPings = 0;
 
   BleTransport get _transport => switch (_transportMode) {
     TransportMode.mock => _mockTransport,
@@ -72,8 +78,10 @@ class AppController {
 
   BleConnectionState get connectionState => _transport.connectionState;
   String _livePuttState = 'Idle';
+  String _bleLatencyLabel = 'BLE latency unavailable';
 
   String get livePuttState => _livePuttState;
+  String get bleLatencyLabel => _bleLatencyLabel;
 
   Future<void> initialize() async {
     if (_isInitialized) {
@@ -96,6 +104,7 @@ class AppController {
 
     _syncStatusController.add(_syncService.status);
     _livePuttStateController.add(_livePuttState);
+    _bleLatencyController.add(_bleLatencyLabel);
     _syncStatusSubscription = _syncService.statusStream.listen(
       _syncStatusController.add,
     );
@@ -125,6 +134,8 @@ class AppController {
   Stream<String> watchDiagnostics() => _diagnosticController.stream;
 
   Stream<String> watchLivePuttState() => _livePuttStateController.stream;
+
+  Stream<String> watchBleLatency() => _bleLatencyController.stream;
 
   Future<void> setTransportMode(TransportMode mode) async {
     if (_transportMode == mode) {
@@ -184,13 +195,26 @@ class AppController {
   Future<void> _bindTransport(BleTransport transport) async {
     await _transportDataSubscription?.cancel();
     await _transportStateSubscription?.cancel();
+    _stopLatencyPings();
 
     _connectionStateController.add(transport.connectionState);
+    if (transport.connectionState == BleConnectionState.connected) {
+      _startLatencyPings();
+    }
     _transportStateSubscription = transport.stateStream.listen((state) {
       _connectionStateController.add(state);
+      if (state == BleConnectionState.connected) {
+        _startLatencyPings();
+      } else {
+        _stopLatencyPings();
+      }
       if (state == BleConnectionState.disconnected) {
         _livePuttState = 'Idle';
         _livePuttStateController.add(_livePuttState);
+        _pendingLatencyPings.clear();
+        _missedLatencyPings = 0;
+        _bleLatencyLabel = 'BLE latency unavailable';
+        _bleLatencyController.add(_bleLatencyLabel);
       }
     });
     _transportDataSubscription = transport.dataStream.listen(
@@ -206,6 +230,18 @@ class AppController {
       if (liveState != null) {
         _livePuttState = liveState;
         _livePuttStateController.add(liveState);
+        return;
+      }
+
+      final pingId = _decodeLatencyPing(bytes);
+      if (pingId != null) {
+        final sentAtMs = _pendingLatencyPings.remove(pingId);
+        if (sentAtMs != null) {
+          final roundTripMs = receivedAtMs - sentAtMs;
+          _missedLatencyPings = 0;
+          _bleLatencyLabel = 'BLE latency ${roundTripMs}ms RTT';
+          _bleLatencyController.add(_bleLatencyLabel);
+        }
         return;
       }
 
@@ -276,7 +312,47 @@ class AppController {
     }
   }
 
+  void _startLatencyPings() {
+    _latencyPingTimer?.cancel();
+    unawaited(_sendLatencyPing());
+    _latencyPingTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      unawaited(_sendLatencyPing());
+    });
+  }
+
+  void _stopLatencyPings() {
+    _latencyPingTimer?.cancel();
+    _latencyPingTimer = null;
+  }
+
+  Future<void> _sendLatencyPing() async {
+    if (_transport.connectionState != BleConnectionState.connected) {
+      return;
+    }
+
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final expiredPingIds = _pendingLatencyPings.entries
+        .where((entry) => (nowMs - entry.value) > 3000)
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    for (final pingId in expiredPingIds) {
+      _pendingLatencyPings.remove(pingId);
+      _missedLatencyPings++;
+    }
+    if (_missedLatencyPings >= 3) {
+      _stopLatencyPings();
+      _bleLatencyLabel = 'BLE latency unsupported; update putter firmware';
+      _bleLatencyController.add(_bleLatencyLabel);
+      return;
+    }
+
+    final pingId = _nextLatencyPingId++;
+    _pendingLatencyPings[pingId] = nowMs;
+    await _transport.sendLatencyPing(pingId);
+  }
+
   Future<void> dispose() async {
+    _stopLatencyPings();
     await _transportDataSubscription?.cancel();
     await _transportStateSubscription?.cancel();
     await _activeSessionSubscription?.cancel();
@@ -288,6 +364,7 @@ class AppController {
     await _syncStatusController.close();
     await _diagnosticController.close();
     await _livePuttStateController.close();
+    await _bleLatencyController.close();
   }
 
   String? _decodeLiveState(Uint8List bytes) {
@@ -317,6 +394,14 @@ class AppController {
       default:
         return rawState;
     }
+  }
+
+  int? _decodeLatencyPing(Uint8List bytes) {
+    final ascii = utf8.decode(bytes, allowMalformed: true).trim();
+    if (!ascii.startsWith('PING:')) {
+      return null;
+    }
+    return int.tryParse(ascii.substring('PING:'.length).trim());
   }
 }
 

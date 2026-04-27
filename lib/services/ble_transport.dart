@@ -24,5 +24,7 @@ abstract class BleTransport {
 
   Future<void> attachSession(int? wireSessionId);
 
+  Future<void> sendLatencyPing(int pingId);
+
   Future<void> dispose();
 }
