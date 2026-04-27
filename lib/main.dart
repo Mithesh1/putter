@@ -7,6 +7,7 @@ import 'package:designcode/services/ble_service.dart';
 import 'package:designcode/services/ble_transport.dart';
 import 'package:designcode/services/session_repository.dart';
 import 'package:designcode/services/sync_service.dart';
+import 'package:designcode/services/ball_data_service.dart';
 import 'package:flutter/material.dart';
 
 void main() {
@@ -26,6 +27,20 @@ class _PutterAppState extends State<PutterApp> {
   late final SessionRepository _repository;
   late final AppController _controller;
   late final Future<void> _initialization;
+  StreamSubscription<BleConnectionState>? _ballDataStateSubscription;
+
+  void _syncBallDataService(BleConnectionState state) {
+    switch (state) {
+      case BleConnectionState.scanning:
+      case BleConnectionState.connecting:
+        unawaited(BallDataService.instance.stop());
+        break;
+      case BleConnectionState.connected:
+      case BleConnectionState.disconnected:
+        BallDataService.instance.start();
+        break;
+    }
+  }
 
   @override
   void initState() {
@@ -37,12 +52,21 @@ class _PutterAppState extends State<PutterApp> {
       syncService: DisabledSyncService(),
       realTransport: BleService(),
     );
-    _initialization = _controller.initialize();
+    _initialization = _controller.initialize().then((_) {
+      _syncBallDataService(_controller.connectionState);
+      _ballDataStateSubscription = _controller.watchConnectionState().listen((
+        state,
+      ) {
+        _syncBallDataService(state);
+      });
+    });
   }
 
   @override
   void dispose() {
+    unawaited(_ballDataStateSubscription?.cancel());
     unawaited(_controller.dispose());
+    unawaited(BallDataService.instance.dispose());
     unawaited(_database.close());
     super.dispose();
   }
@@ -149,107 +173,147 @@ class DashboardPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<StoredStroke?>(
-      stream: controller.watchLatestStroke(),
-      builder: (context, latestSnapshot) {
-        final latestStroke = latestSnapshot.data;
-        return StreamBuilder<PracticeSession?>(
-          stream: controller.watchActiveSession(),
-          builder: (context, sessionSnapshot) {
-            final activeSession = sessionSnapshot.data;
-            return StreamBuilder<BleConnectionState>(
-              stream: controller.watchConnectionState(),
-              initialData: controller.connectionState,
-              builder: (context, connectionSnapshot) {
-                return StreamBuilder<String>(
-                  stream: controller.watchSyncStatus(),
-                  initialData: 'Cloud sync disabled',
-                  builder: (context, syncSnapshot) {
-                    final metrics = [
-                      MetricCardData(
-                        title: 'Face Angle',
-                        value:
-                            latestStroke?.metrics.faceAngleLabel ?? 'No data',
-                        subtitle: latestStroke == null
-                            ? 'Waiting for stroke'
-                            : 'Last putt',
-                        icon: Icons.track_changes,
-                      ),
-                      MetricCardData(
-                        title: 'Tempo',
-                        value: latestStroke?.metrics.tempoLabel ?? 'No data',
-                        subtitle: 'Back / through',
-                        icon: Icons.timelapse,
-                      ),
-                      MetricCardData(
-                        title: 'Impact',
-                        value: latestStroke?.metrics.impact ?? 'No data',
-                        subtitle: 'Contact location',
-                        icon: Icons.center_focus_strong,
-                      ),
-                      MetricCardData(
-                        title: 'Ball Roll',
-                        value:
-                            latestStroke?.metrics.rollStatus ?? 'Unavailable',
-                        subtitle: 'Camera data not in v1',
-                        icon: Icons.circle_outlined,
-                      ),
-                    ];
-
-                    return SafeArea(
-                      child: SingleChildScrollView(
-                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const HeaderSection(),
-                            const SizedBox(height: 20),
-                            LiveStatusCard(
-                              connectionState:
-                                  connectionSnapshot.data ??
-                                  controller.connectionState,
-                              transportName: controller.transportName,
-                              activeSession: activeSession,
-                              syncStatus:
-                                  syncSnapshot.data ?? 'Cloud sync disabled',
-                            ),
-                            const SizedBox(height: 24),
-                            const Text(
-                              'Last Putt Snapshot',
-                              style: TextStyle(
-                                fontSize: 22,
-                                fontWeight: FontWeight.w800,
+    return StreamBuilder<BallData>(
+      stream: BallDataService.instance.stream,
+      initialData: BallDataService.instance.latestBallData,
+      builder: (context, ballSnapshot) {
+        final ballData = ballSnapshot.data;
+        return StreamBuilder<String>(
+          stream: BallDataService.instance.debugStream,
+          initialData: BallDataService.instance.latestDebugMessage,
+          builder: (context, ballDebugSnapshot) {
+            final ballDebug =
+                ballDebugSnapshot.data ??
+                BallDataService.instance.latestDebugMessage;
+            return StreamBuilder<StoredStroke?>(
+              stream: controller.watchLatestStroke(),
+              builder: (context, latestSnapshot) {
+                final latestStroke = latestSnapshot.data;
+                return StreamBuilder<PracticeSession?>(
+                  stream: controller.watchActiveSession(),
+                  builder: (context, sessionSnapshot) {
+                    final activeSession = sessionSnapshot.data;
+                    return StreamBuilder<BleConnectionState>(
+                      stream: controller.watchConnectionState(),
+                      initialData: controller.connectionState,
+                      builder: (context, connectionSnapshot) {
+                        return StreamBuilder<String>(
+                          stream: controller.watchSyncStatus(),
+                          initialData: 'Cloud sync disabled',
+                          builder: (context, syncSnapshot) {
+                            final metrics = [
+                              MetricCardData(
+                                title: 'Face Angle',
+                                value:
+                                    latestStroke?.metrics.faceAngleLabel ??
+                                    'No data',
+                                subtitle: latestStroke == null
+                                    ? 'Waiting for stroke'
+                                    : 'Last putt',
+                                icon: Icons.track_changes,
                               ),
-                            ),
-                            const SizedBox(height: 12),
-                            GridView.builder(
-                              itemCount: metrics.length,
-                              shrinkWrap: true,
-                              physics: const NeverScrollableScrollPhysics(),
-                              gridDelegate:
-                                  const SliverGridDelegateWithFixedCrossAxisCount(
-                                    crossAxisCount: 2,
-                                    mainAxisSpacing: 12,
-                                    crossAxisSpacing: 12,
-                                    childAspectRatio: 1.18,
-                                  ),
-                              itemBuilder: (context, index) =>
-                                  MetricCard(data: metrics[index]),
-                            ),
-                            const SizedBox(height: 24),
-                            const SectionTitle(title: 'Session Summary'),
-                            const SizedBox(height: 12),
-                            SummaryCard(
-                              activeSession: activeSession,
-                              latestStroke: latestStroke,
-                            ),
-                            const SizedBox(height: 24),
-                            const SectionTitle(title: 'Coach Notes'),
-                            const SizedBox(height: 12),
-                            CoachNotesCard(latestStroke: latestStroke),
-                          ],
-                        ),
-                      ),
+                              MetricCardData(
+                                title: 'Tempo',
+                                value:
+                                    latestStroke?.metrics.tempoLabel ??
+                                    'No data',
+                                subtitle: 'Back / through',
+                                icon: Icons.timelapse,
+                              ),
+                              MetricCardData(
+                                title: 'Impact',
+                                value:
+                                    latestStroke?.metrics.impact ?? 'No data',
+                                subtitle: 'Contact location',
+                                icon: Icons.center_focus_strong,
+                              ),
+                              MetricCardData(
+                                title: 'Ball Speed',
+                                value: ballData == null
+                                    ? 'No data'
+                                    : '${ballData.avgVelocityMph.toStringAsFixed(1)} mph',
+                                subtitle: ballData == null
+                                    ? 'Waiting for burst'
+                                    : 'Peak ${ballData.peakVelocityMph.toStringAsFixed(1)} mph',
+                                icon: Icons.circle_outlined,
+                              ),
+                            ];
+
+                            return SafeArea(
+                              child: SingleChildScrollView(
+                                padding: const EdgeInsets.fromLTRB(
+                                  16,
+                                  16,
+                                  16,
+                                  24,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const HeaderSection(),
+                                    const SizedBox(height: 20),
+                                    LiveStatusCard(
+                                      connectionState:
+                                          connectionSnapshot.data ??
+                                          controller.connectionState,
+                                      transportName: controller.transportName,
+                                      activeSession: activeSession,
+                                      syncStatus:
+                                          syncSnapshot.data ??
+                                          'Cloud sync disabled',
+                                    ),
+                                    const SizedBox(height: 16),
+                                    BallDebugCard(message: ballDebug),
+                                    const SizedBox(height: 24),
+                                    const Text(
+                                      'Last Putt Snapshot',
+                                      style: TextStyle(
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    GridView.builder(
+                                      itemCount: metrics.length,
+                                      shrinkWrap: true,
+                                      physics:
+                                          const NeverScrollableScrollPhysics(),
+                                      gridDelegate:
+                                          const SliverGridDelegateWithFixedCrossAxisCount(
+                                            crossAxisCount: 2,
+                                            mainAxisSpacing: 12,
+                                            crossAxisSpacing: 12,
+                                            childAspectRatio: 1.18,
+                                          ),
+                                      itemBuilder: (context, index) =>
+                                          MetricCard(data: metrics[index]),
+                                    ),
+                                    const SizedBox(height: 24),
+                                    const SectionTitle(
+                                      title: 'Ball Roll Analysis',
+                                    ),
+                                    const SizedBox(height: 12),
+                                    BallRollCard(ballData: ballData),
+                                    const SizedBox(height: 24),
+                                    const SectionTitle(
+                                      title: 'Session Summary',
+                                    ),
+                                    const SizedBox(height: 12),
+                                    SummaryCard(
+                                      activeSession: activeSession,
+                                      latestStroke: latestStroke,
+                                    ),
+                                    const SizedBox(height: 24),
+                                    const SectionTitle(title: 'Coach Notes'),
+                                    const SizedBox(height: 12),
+                                    CoachNotesCard(latestStroke: latestStroke),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        );
+                      },
                     );
                   },
                 );
@@ -258,6 +322,36 @@ class DashboardPage extends StatelessWidget {
           },
         );
       },
+    );
+  }
+}
+
+class BallDebugCard extends StatelessWidget {
+  const BallDebugCard({super.key, required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF3F8F4),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFCAE3CF)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Ball Data Debug',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 6),
+          Text(message, style: const TextStyle(fontSize: 13)),
+        ],
+      ),
     );
   }
 }
@@ -1162,6 +1256,79 @@ class EmptyStateCard extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+class BallRollCard extends StatelessWidget {
+  const BallRollCard({super.key, required this.ballData});
+
+  final BallData? ballData;
+
+  @override
+  Widget build(BuildContext context) {
+    if (ballData == null) {
+      return const EmptyStateCard(
+        title: 'No ball data yet',
+        subtitle: 'Run a burst capture to see roll analysis here.',
+      );
+    }
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x12000000),
+            blurRadius: 14,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.circle_outlined, color: Color(0xFF1B5E20)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '${ballData!.avgVelocityMph.toStringAsFixed(2)} mph avg'
+                  '  •  ${ballData!.peakVelocityMph.toStringAsFixed(2)} mph peak',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _MetricWrap(
+            values: [
+              'Roll ${ballData!.totalRollDistanceIn.toStringAsFixed(2)} in',
+              '${ballData!.totalRollDistanceBallDiam.toStringAsFixed(2)} ball diam',
+              'Spin ${ballData!.rotationRateDegS.toStringAsFixed(1)} deg/s',
+              'Wobble: ${ballData!.wobbleDetected ? "YES  ${ballData!.wobbleMagnitudeDeg.toStringAsFixed(1)}°" : "NO"}',
+              '${ballData!.frameCount} frames @ ${ballData!.fps.toStringAsFixed(1)} fps',
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Received ${_fmtTime(ballData!.receivedAt)}',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _fmtTime(DateTime dt) {
+    return '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}:'
+        '${dt.second.toString().padLeft(2, '0')}';
   }
 }
 

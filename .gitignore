@@ -32,6 +32,8 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+.venv-burst/
+burst_run/__pycache__/
 
 # Symbolication related
 app.*.symbols
