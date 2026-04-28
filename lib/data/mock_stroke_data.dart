@@ -193,7 +193,7 @@ RawStrokePacket generateMockRawStrokePacket({
     sessionId: sessionId,
     captureStartMs: captureStartMs,
     impactOffsetMs: impactOffsetMs,
-    flags: 0,
+    flags: 284,
     imuSampleRateHz: imuSampleRateHz,
     imuChannels: imuChannels,
     imuSampleCount: imuSampleCount,

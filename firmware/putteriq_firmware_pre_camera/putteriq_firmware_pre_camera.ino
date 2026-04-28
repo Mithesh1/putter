@@ -92,12 +92,12 @@ sh2_SensorValue_t sensorValue;
 static const float STABLE_GYRO_THRESHOLD_DPS = 4.0f;
 static const float BACKSTROKE_RATE_THRESHOLD_DPS = 12.0f;
 static const float FORWARD_STROKE_RATE_THRESHOLD_DPS = -10.0f;
-static const float FORWARD_MOTION_END_RATE_DPS = -1.0f;
+static const float FORWARD_MOTION_END_RATE_DPS = 2.0f;
 static const float PITCH_RETURN_TOLERANCE_DEG = 1.5f;
 
 static const uint8_t MOTION_CONFIRM_FRAMES = 3;
 static const uint8_t FOLLOW_THROUGH_CONFIRM_FRAMES = 2;
-static const uint8_t IMPACT_GRACE_CONFIRM_FRAMES = 6;
+static const uint8_t IMPACT_GRACE_CONFIRM_FRAMES = 10;
 static const uint16_t PRE_TAKEAWAY_SETUP_SAMPLES = 5;
 static const uint32_t READY_BUTTON_DEBOUNCE_MS = 30UL;
 
@@ -215,6 +215,7 @@ struct StrokeCapture {
   uint32_t capture_start_ms;
   uint32_t capture_start_us;
   uint32_t impact_time_ms;
+  uint32_t impact_time_us;
   uint16_t calibration_imu_index;
   uint16_t imu_sample_count;
   uint16_t piezo_sample_count;
@@ -609,6 +610,7 @@ static void resetStrokeCapture() {
   strokeCapture.capture_start_ms = 0;
   strokeCapture.capture_start_us = 0;
   strokeCapture.impact_time_ms = 0;
+  strokeCapture.impact_time_us = 0;
   strokeCapture.calibration_imu_index = 0;
   strokeCapture.imu_sample_count = 0;
   strokeCapture.piezo_sample_count = 0;
@@ -869,13 +871,17 @@ static size_t buildRawStrokePacket(uint8_t *buffer, size_t bufferSize,
       strokeCapture.impact_time_ms > strokeCapture.capture_start_ms
           ? (strokeCapture.impact_time_ms - strokeCapture.capture_start_ms)
           : 0;
+  const uint32_t impactToBleTxDeciMs =
+      strokeCapture.impact_time_us > 0 && micros() > strokeCapture.impact_time_us
+          ? ((micros() - strokeCapture.impact_time_us + 50UL) / 100UL)
+          : 0;
 
   buffer[0] = 0;
   writeUint32LE(buffer, 0, packetId);
   writeUint32LE(buffer, 4, sessionId);
   writeUint32LE(buffer, 8, strokeCapture.capture_start_ms);
   writeUint16LE(buffer, 12, (uint16_t)min((uint32_t)65535, impactOffsetMs));
-  writeUint16LE(buffer, 14, 0);
+  writeUint16LE(buffer, 14, (uint16_t)min((uint32_t)65535, impactToBleTxDeciMs));
   writeUint16LE(buffer, 16, (uint16_t)(1000000UL / IMU_CAPTURE_PERIOD_US));
   buffer[18] = (uint8_t)IMU_CHANNEL_COUNT;
   writeUint16LE(buffer, 19, strokeCapture.imu_sample_count);
@@ -1194,15 +1200,19 @@ static void armReadyWindow() {
 
 static bool impactPitchCrossedReady() {
   if (!latestImu.orientation_valid || !putt.full_forward_seen ||
-      putt.state != PUTT_FORWARD_STROKE || !latestImu.gyro_valid ||
-      !rateStillMovingForward(strokeMotionRateDps(latestImu))) {
+      putt.state != PUTT_FORWARD_STROKE || !latestImu.gyro_valid) {
     return false;
   }
 
   const float current_delta_deg = pitchDeltaFromReadyDeg(latestImu);
   const float previous_delta_deg = putt.previous_pitch_delta_deg;
-  return ((previous_delta_deg < 0.0f) && (current_delta_deg >= 0.0f)) ||
-         ((previous_delta_deg > 0.0f) && (current_delta_deg <= 0.0f));
+  const bool crossed_ready =
+      ((previous_delta_deg < 0.0f) && (current_delta_deg >= 0.0f)) ||
+      ((previous_delta_deg > 0.0f) && (current_delta_deg <= 0.0f));
+  const bool within_ready_tolerance =
+      fabsf(current_delta_deg) <= PITCH_RETURN_TOLERANCE_DEG;
+
+  return crossed_ready || within_ready_tolerance;
 }
 
 static bool impactUsesCurrentSample() {
@@ -1348,8 +1358,10 @@ static void updatePuttStateMachine() {
         const bool use_current_sample = impactUsesCurrentSample();
         const uint32_t impact_time_ms =
             use_current_sample ? now_ms : putt.previous_pitch_sample_ms;
+        const uint32_t impact_time_us = micros();
         putt.impact_ms = impact_time_ms;
         strokeCapture.impact_time_ms = impact_time_ms;
+        strokeCapture.impact_time_us = impact_time_us;
         Serial.print("Impact crossing ready pitch=");
         Serial.print(putt.ready_pitch_deg, 2);
         Serial.print(" prevPitch=");

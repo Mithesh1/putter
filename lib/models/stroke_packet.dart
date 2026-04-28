@@ -92,6 +92,7 @@ class RawStrokePacket {
   });
 
   int get impactTimeMs => captureStartMs + impactOffsetMs;
+  double get impactToBleTxMs => flags / 10.0;
   int get expectedImuValueCount => imuChannels * imuSampleCount;
   int get expectedPiezoValueCount => piezoChannels * piezoSampleCount;
 }

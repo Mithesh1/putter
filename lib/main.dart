@@ -179,502 +179,63 @@ class DashboardPage extends StatelessWidget {
                           stream: controller.watchBleLatency(),
                           initialData: controller.bleLatencyLabel,
                           builder: (context, latencySnapshot) {
-                            final latestPuttSeries = latestStroke == null
-                                ? null
-                                : _buildLatestPuttSeries(latestStroke);
-                            final strokeMetrics = latestStroke?.metrics;
-                            final showImpactWarning =
-                                latestStroke?.metrics.impact == 'Unknown';
-                            final metrics = [
-                          MetricCardData(
-                            title: 'Face Angle',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _impactValueLabel(
-                                    latestPuttSeries.gyroIntegratedFaceAnglePoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    suffix: '°',
-                                  ),
-                            subtitle: latestStroke == null
-                                ? 'Waiting for stroke'
-                                : 'Integrated gyro Z at impact',
-                            icon: Icons.track_changes,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : MiniChartData(
-                                    series: [
-                                      MiniChartSeries(
-                                        label: 'Face',
-                                        color: const Color(0xFF1B5E20),
-                                        points:
-                                            latestPuttSeries.gyroIntegratedFaceAnglePoints,
-                                      ),
-                                    ],
-                                    impactMs:
-                                        latestPuttSeries.imuImpactOffsetMs.toDouble(),
-                                    referenceValue: 0,
-                                    minY: -30,
-                                    maxY: 30,
-                                    unitLabel: 'deg',
-                                    markers: _strokePhaseMarkers(
-                                      latestPuttSeries,
+                            return StreamBuilder<String>(
+                              stream: controller.watchImpactToBleLatency(),
+                              initialData: controller.impactToBleLatencyLabel,
+                              builder: (context, impactToBleSnapshot) {
+                                return SafeArea(
+                                  child: SingleChildScrollView(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      16,
+                                      16,
+                                      16,
+                                      24,
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        const HeaderSection(),
+                                        const SizedBox(height: 20),
+                                        LiveStatusCard(
+                                          connectionState:
+                                              connectionSnapshot.data ??
+                                              controller.connectionState,
+                                          transportName: controller.transportName,
+                                          activeSession: activeSession,
+                                          syncStatus: syncSnapshot.data ??
+                                              'Cloud sync disabled',
+                                          puttState: liveStateSnapshot.data ??
+                                              controller.livePuttState,
+                                          bleLatencyLabel: latencySnapshot.data ??
+                                              controller.bleLatencyLabel,
+                                          impactToBleLatencyLabel:
+                                              impactToBleSnapshot.data ??
+                                              controller.impactToBleLatencyLabel,
+                                        ),
+                                        const SizedBox(height: 24),
+                                        _StrokeSnapshotSection(
+                                          title: 'Last Putt Snapshot',
+                                          stroke: latestStroke,
+                                          emptySubtitle: 'Waiting for stroke',
+                                        ),
+                                        const SizedBox(height: 24),
+                                        const SectionTitle(
+                                          title: 'Session Summary',
+                                        ),
+                                        const SizedBox(height: 12),
+                                        SummaryCard(
+                                          activeSession: activeSession,
+                                          latestStroke: latestStroke,
+                                        ),
+                                        const SizedBox(height: 24),
+                                        const SectionTitle(title: 'Coach Notes'),
+                                        const SizedBox(height: 12),
+                                        CoachNotesCard(latestStroke: latestStroke),
+                                      ],
                                     ),
                                   ),
-                          ),
-                          MetricCardData(
-                            title: 'Tempo Ratio',
-                            value: strokeMetrics == null
-                                ? 'No data'
-                                : '${strokeMetrics.tempoRatio.toStringAsFixed(2)}:1',
-                            subtitle: 'Backstroke to forward stroke',
-                            icon: Icons.timelapse,
-                          ),
-                          MetricCardData(
-                            title: 'Backstroke Duration',
-                            value: strokeMetrics == null
-                                ? 'No data'
-                                : _formatDurationMs(
-                                    strokeMetrics.backstrokeDurationMs,
-                                  ),
-                            subtitle: 'Backstroke start to forward start',
-                            icon: Icons.arrow_back,
-                          ),
-                          MetricCardData(
-                            title: 'Forward Duration',
-                            value: strokeMetrics == null
-                                ? 'No data'
-                                : _formatDurationMs(
-                                    strokeMetrics.forwardStrokeDurationMs,
-                                  ),
-                            subtitle: 'Forward start to impact',
-                            icon: Icons.arrow_forward,
-                          ),
-                          MetricCardData(
-                            title: 'Total Stroke Duration',
-                            value: strokeMetrics == null
-                                ? 'No data'
-                                : _formatDurationMs(
-                                    strokeMetrics.totalStrokeDurationMs,
-                                  ),
-                            subtitle: 'Backstroke start to follow-through end',
-                            icon: Icons.schedule,
-                          ),
-                          MetricCardData(
-                            title: 'Peak Stroke Angular Velocity',
-                            value: strokeMetrics == null
-                                ? 'No data'
-                                : strokeMetrics.peakAngularVelocityLabel,
-                            subtitle: 'Peak gyro Y rotation rate',
-                            icon: Icons.speed,
-                          ),
-                          MetricCardData(
-                            title: 'Stroke Speed',
-                            value: strokeMetrics == null
-                                ? 'No data'
-                                : strokeMetrics.speedLabel,
-                            subtitle: 'Impact speed along main putt axis',
-                            icon: Icons.sports_score,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.speedPoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    color: const Color(0xFF00695C),
-                                    label: 'Stroke Speed',
-                                    minY: -4.0,
-                                    maxY: 4.0,
-                                    unitLabel: 'm/s',
-                                    markers: _strokePhaseMarkers(
-                                      latestPuttSeries,
-                                    ),
-                                  ),
-                          ),
-                          MetricCardData(
-                            title: 'Gyro X',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _impactValueLabel(
-                                    latestPuttSeries.gyroXPoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    suffix: '°/s',
-                                    digits: 1,
-                                  ),
-                            subtitle: 'Gyro X at impact',
-                            icon: Icons.swap_horiz,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.gyroXPoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    color: const Color(0xFF1565C0),
-                                    label: 'Gyro X',
-                                    minY: -60,
-                                    maxY: 60,
-                                    unitLabel: 'dps',
-                                    markers: _gyroPhaseMarkers(
-                                      latestPuttSeries,
-                                    ),
-                                  ),
-                          ),
-                          MetricCardData(
-                            title: 'Push / Pull',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _impactValueLabel(
-                                    latestPuttSeries.gyroIntegratedXPoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    suffix: '°',
-                                  ),
-                            subtitle: 'Integrated gyro X through impact',
-                            icon: Icons.compare_arrows,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.gyroIntegratedXPoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    color: const Color(0xFF0D47A1),
-                                    label: 'Integrated Gyro X',
-                                    minY: -25,
-                                    maxY: 25,
-                                    unitLabel: 'deg',
-                                  ),
-                          ),
-                          MetricCardData(
-                            title: 'Gyro Y',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _impactValueLabel(
-                                    latestPuttSeries.gyroYPoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    suffix: '°/s',
-                                    digits: 1,
-                                  ),
-                            subtitle: 'Gyro Y at impact',
-                            icon: Icons.swap_vert,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.gyroYPoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    color: const Color(0xFF2E7D32),
-                                    label: 'Gyro Y',
-                                    minY: -60,
-                                    maxY: 60,
-                                    unitLabel: 'dps',
-                                    markers: _gyroPhaseMarkers(
-                                      latestPuttSeries,
-                                    ),
-                                  ),
-                          ),
-                          MetricCardData(
-                            title: 'Gyro Z',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _impactValueLabel(
-                                    latestPuttSeries.gyroZPoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    suffix: '°/s',
-                                    digits: 1,
-                                  ),
-                            subtitle: 'Gyro Z at impact',
-                            icon: Icons.screen_rotation_alt,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.gyroZPoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    color: const Color(0xFF8E24AA),
-                                    label: 'Gyro Z',
-                                    minY: -60,
-                                    maxY: 60,
-                                    unitLabel: 'dps',
-                                    markers: _gyroPhaseMarkers(
-                                      latestPuttSeries,
-                                    ),
-                                  ),
-                          ),
-                          MetricCardData(
-                            title: 'Impact',
-                            value: strokeMetrics?.impact ?? 'No data',
-                            subtitle: 'Contact location',
-                            icon: Icons.center_focus_strong,
-                          ),
-                          MetricCardData(
-                            title: 'Ball Roll',
-                            value: strokeMetrics?.rollStatus ?? 'Unavailable',
-                            subtitle: 'Camera data not in v1',
-                            icon: Icons.circle_outlined,
-                          ),
-                          MetricCardData(
-                            title: 'Yaw',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _impactValueLabel(
-                                    latestPuttSeries.yawPoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    suffix: '°',
-                                  ),
-                            subtitle: 'Orientation over time',
-                            icon: Icons.explore,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.yawPoints,
-                                    impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
-                                    color: const Color(0xFF00897B),
-                                    label: 'Yaw',
-                                    minY: -30,
-                                    maxY: 30,
-                                    unitLabel: 'deg',
-                                  ),
-                          ),
-                          MetricCardData(
-                            title: 'Pitch',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _impactValueLabel(
-                                    latestPuttSeries.pitchPoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    suffix: '°',
-                                  ),
-                            subtitle: 'Orientation over time',
-                            icon: Icons.show_chart,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.pitchPoints,
-                                    impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
-                                    color: const Color(0xFF5E35B1),
-                                    label: 'Pitch',
-                                    minY: -30,
-                                    maxY: 30,
-                                    unitLabel: 'deg',
-                                  ),
-                          ),
-                          MetricCardData(
-                            title: 'Roll',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _impactValueLabel(
-                                    latestPuttSeries.rollPoints,
-                                    impactOffsetMs:
-                                        latestPuttSeries.imuImpactOffsetMs,
-                                    suffix: '°',
-                                  ),
-                            subtitle: 'Orientation over time',
-                            icon: Icons.rotate_right,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.rollPoints,
-                                    impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
-                                    color: const Color(0xFF6D4C41),
-                                    label: 'Roll',
-                                    minY: -30,
-                                    maxY: 30,
-                                    unitLabel: 'deg',
-                                  ),
-                          ),
-                          MetricCardData(
-                            title: 'Accel X',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _peakAbsLabel(
-                                    latestPuttSeries.accelXPoints,
-                                    suffix: 'm/s²',
-                                  ),
-                            subtitle: 'Acceleration over time',
-                            icon: Icons.trending_flat,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.accelXPoints,
-                                    impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
-                                    color: const Color(0xFF3949AB),
-                                    label: 'Accel X',
-                                    minY: -10,
-                                    maxY: 10,
-                                    unitLabel: 'm/s²',
-                                  ),
-                          ),
-                          MetricCardData(
-                            title: 'Accel Y',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _peakAbsLabel(
-                                    latestPuttSeries.accelYPoints,
-                                    suffix: 'm/s²',
-                                  ),
-                            subtitle: 'Acceleration over time',
-                            icon: Icons.swap_vert,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.accelYPoints,
-                                    impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
-                                    color: const Color(0xFF00838F),
-                                    label: 'Accel Y',
-                                    minY: -10,
-                                    maxY: 10,
-                                    unitLabel: 'm/s²',
-                                  ),
-                          ),
-                          MetricCardData(
-                            title: 'Accel Z',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _peakAbsLabel(
-                                    latestPuttSeries.accelZPoints,
-                                    suffix: 'm/s²',
-                                  ),
-                            subtitle: 'Acceleration over time',
-                            icon: Icons.height,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.accelZPoints,
-                                    impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
-                                    color: const Color(0xFFE53935),
-                                    label: 'Accel Z',
-                                    minY: -10,
-                                    maxY: 10,
-                                    unitLabel: 'm/s²',
-                                  ),
-                          ),
-                          MetricCardData(
-                            title: 'Piezo 1',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _impactValueLabel(
-                                    latestPuttSeries.piezo1Points,
-                                    impactOffsetMs:
-                                        latestPuttSeries.piezoImpactOffsetMs,
-                                    suffix: '',
-                                    digits: 0,
-                                  ),
-                            subtitle: 'Piezo channel over time',
-                            icon: Icons.graphic_eq,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.piezo1Points,
-                                    impactOffsetMs: latestPuttSeries.piezoImpactOffsetMs,
-                                    color: const Color(0xFFFB8C00),
-                                    label: 'Piezo 1',
-                                    minY: 0,
-                                    maxY: 500,
-                                    unitLabel: 'raw',
-                                  ),
-                          ),
-                          MetricCardData(
-                            title: 'Piezo 2',
-                            value: latestPuttSeries == null
-                                ? 'No data'
-                                : _impactValueLabel(
-                                    latestPuttSeries.piezo2Points,
-                                    impactOffsetMs:
-                                        latestPuttSeries.piezoImpactOffsetMs,
-                                    suffix: '',
-                                    digits: 0,
-                                  ),
-                            subtitle: 'Piezo channel over time',
-                            icon: Icons.multitrack_audio,
-                            chart: latestPuttSeries == null
-                                ? null
-                                : _singleSeriesChart(
-                                    points: latestPuttSeries.piezo2Points,
-                                    impactOffsetMs: latestPuttSeries.piezoImpactOffsetMs,
-                                    color: const Color(0xFF8E24AA),
-                                    label: 'Piezo 2',
-                                    minY: 0,
-                                    maxY: 500,
-                                    unitLabel: 'raw',
-                                  ),
-                          ),
-                            ];
-
-                            return SafeArea(
-                              child: SingleChildScrollView(
-                                padding: const EdgeInsets.fromLTRB(
-                                  16,
-                                  16,
-                                  16,
-                                  24,
-                                ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    const HeaderSection(),
-                                    const SizedBox(height: 20),
-                                    LiveStatusCard(
-                                      connectionState:
-                                          connectionSnapshot.data ??
-                                          controller.connectionState,
-                                      transportName: controller.transportName,
-                                      activeSession: activeSession,
-                                      syncStatus: syncSnapshot.data ??
-                                          'Cloud sync disabled',
-                                      puttState: liveStateSnapshot.data ??
-                                          controller.livePuttState,
-                                      bleLatencyLabel: latencySnapshot.data ??
-                                          controller.bleLatencyLabel,
-                                    ),
-                                    if (showImpactWarning) ...[
-                                      const SizedBox(height: 16),
-                                      const _ImpactWarningCard(),
-                                    ],
-                                    const SizedBox(height: 24),
-                                    const Text(
-                                      'Last Putt Snapshot',
-                                      style: TextStyle(
-                                        fontSize: 22,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 12),
-                                    GridView.builder(
-                                      itemCount: metrics.length,
-                                      shrinkWrap: true,
-                                      physics:
-                                          const NeverScrollableScrollPhysics(),
-                                      gridDelegate:
-                                          const SliverGridDelegateWithFixedCrossAxisCount(
-                                            crossAxisCount: 2,
-                                            mainAxisSpacing: 12,
-                                            crossAxisSpacing: 12,
-                                            childAspectRatio: 1.18,
-                                          ),
-                                      itemBuilder: (context, index) =>
-                                          MetricCard(data: metrics[index]),
-                                    ),
-                                    const SizedBox(height: 24),
-                                    const SectionTitle(
-                                      title: 'Session Summary',
-                                    ),
-                                    const SizedBox(height: 12),
-                                    SummaryCard(
-                                      activeSession: activeSession,
-                                      latestStroke: latestStroke,
-                                    ),
-                                    const SizedBox(height: 24),
-                                    const SectionTitle(title: 'Coach Notes'),
-                                    const SizedBox(height: 12),
-                                    CoachNotesCard(latestStroke: latestStroke),
-                                  ],
-                                ),
-                              ),
+                                );
+                              },
                             );
                           },
                         );
@@ -691,20 +252,39 @@ class DashboardPage extends StatelessWidget {
   }
 }
 
-class SessionPage extends StatelessWidget {
+class SessionPage extends StatefulWidget {
   const SessionPage({super.key, required this.controller});
 
   final AppController controller;
 
   @override
+  State<SessionPage> createState() => _SessionPageState();
+}
+
+class _SessionPageState extends State<SessionPage> {
+  int? _selectedStrokeId;
+
+  void _selectStroke(StoredStroke stroke) {
+    setState(() {
+      _selectedStrokeId = stroke.localId ?? stroke.packetId;
+    });
+  }
+
+  void _clearSelectedStroke() {
+    setState(() {
+      _selectedStrokeId = null;
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     return StreamBuilder<PracticeSession?>(
-      stream: controller.watchActiveSession(),
+      stream: widget.controller.watchActiveSession(),
       builder: (context, sessionSnapshot) {
         final activeSession = sessionSnapshot.data;
         final sessionDetailStream = activeSession?.localId == null
             ? const Stream<SessionDetail?>.empty()
-            : controller.watchSessionDetail(activeSession!.localId!);
+            : widget.controller.watchSessionDetail(activeSession!.localId!);
 
         return StreamBuilder<SessionDetail?>(
           stream: sessionDetailStream,
@@ -725,13 +305,17 @@ class SessionPage extends StatelessWidget {
                           .map((stroke) => stroke.metrics.tempoRatio)
                           .reduce((a, b) => a + b) /
                       strokes.length;
+            final selectedStroke = strokes.cast<StoredStroke?>().firstWhere(
+                  (stroke) =>
+                      (stroke?.localId ?? stroke?.packetId) == _selectedStrokeId,
+                  orElse: () => null,
+                );
+            final hasSelection = selectedStroke != null;
 
             return SafeArea(
-              child: Padding(
+              child: ListView(
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
+                children: [
                     const Text(
                       'Practice Session',
                       style: TextStyle(
@@ -787,9 +371,9 @@ class SessionPage extends StatelessWidget {
                           child: FilledButton.icon(
                             onPressed: () async {
                               if (activeSession == null) {
-                                await controller.startSession();
+                                await widget.controller.startSession();
                               } else {
-                                await controller.endSession();
+                                await widget.controller.endSession();
                               }
                             },
                             icon: Icon(
@@ -807,41 +391,75 @@ class SessionPage extends StatelessWidget {
                         const SizedBox(width: 10),
                         Expanded(
                           child: OutlinedButton.icon(
-                            onPressed: () => controller.reconnect(),
+                            onPressed: () => widget.controller.reconnect(),
                             icon: const Icon(Icons.bluetooth_searching),
                             label: const Text('Reconnect'),
                           ),
                         ),
                       ],
                     ),
+                    if (hasSelection) ...[
+                      const SizedBox(height: 18),
+                      Row(
+                        children: [
+                          const Expanded(
+                            child: Text(
+                              'Selected Putt',
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          TextButton.icon(
+                            onPressed: _clearSelectedStroke,
+                            icon: const Icon(Icons.close),
+                            label: const Text('Clear'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      _StrokeSnapshotSection(
+                        title: 'Stroke ${selectedStroke.packetId}',
+                        stroke: selectedStroke,
+                        emptySubtitle: 'Tap a stroke to inspect it',
+                      ),
+                    ],
                     const SizedBox(height: 18),
-                    const Text(
-                      'Recent Stroke Feed',
+                    Text(
+                      hasSelection ? 'Other Strokes' : 'Recent Stroke Feed',
                       style: TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.w800,
                       ),
                     ),
                     const SizedBox(height: 10),
-                    Expanded(
-                      child: strokes.isEmpty
-                          ? const EmptyStateCard(
-                              title: 'No strokes yet',
-                              subtitle:
-                                  'Start a session to let the mock BLE pipeline stream fragmented strokes into the app.',
-                            )
-                          : ListView.separated(
-                              itemCount: strokes.length,
-                              separatorBuilder: (_, _) =>
-                                  const SizedBox(height: 10),
-                              itemBuilder: (context, index) =>
-                                  StrokeListItem(stroke: strokes[index]),
-                            ),
-                    ),
+                    const SizedBox(height: 10),
+                    if (strokes.isEmpty)
+                      const EmptyStateCard(
+                        title: 'No strokes yet',
+                        subtitle:
+                            'Start a session to let the mock BLE pipeline stream fragmented strokes into the app.',
+                      )
+                    else
+                      ...List.generate(strokes.length, (index) {
+                        final stroke = strokes[index];
+                        final strokeKey = stroke.localId ?? stroke.packetId;
+                        return Padding(
+                          padding: EdgeInsets.only(
+                            bottom: index == strokes.length - 1 ? 24 : 10,
+                          ),
+                          child: StrokeListItem(
+                            stroke: stroke,
+                            onTap: () => _selectStroke(stroke),
+                            compact: hasSelection,
+                            selected: strokeKey == _selectedStrokeId,
+                          ),
+                        );
+                      }),
                   ],
                 ),
-              ),
-            );
+              );
           },
         );
       },
@@ -1050,6 +668,7 @@ class LiveStatusCard extends StatelessWidget {
     required this.syncStatus,
     required this.puttState,
     required this.bleLatencyLabel,
+    required this.impactToBleLatencyLabel,
   });
 
   final BleConnectionState connectionState;
@@ -1058,6 +677,7 @@ class LiveStatusCard extends StatelessWidget {
   final String syncStatus;
   final String puttState;
   final String bleLatencyLabel;
+  final String impactToBleLatencyLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -1116,6 +736,11 @@ class LiveStatusCard extends StatelessWidget {
           const SizedBox(height: 8),
           Text(
             bleLatencyLabel,
+            style: const TextStyle(color: Colors.white70, fontSize: 13),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            impactToBleLatencyLabel,
             style: const TextStyle(color: Colors.white70, fontSize: 13),
           ),
           const SizedBox(height: 14),
@@ -1701,79 +1326,172 @@ class MiniStat extends StatelessWidget {
 }
 
 class StrokeListItem extends StatelessWidget {
-  const StrokeListItem({super.key, required this.stroke});
+  const StrokeListItem({
+    super.key,
+    required this.stroke,
+    this.onTap,
+    this.compact = false,
+    this.selected = false,
+  });
 
   final StoredStroke stroke;
+  final VoidCallback? onTap;
+  final bool compact;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
     final metrics = stroke.metrics;
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
         borderRadius: BorderRadius.circular(18),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x12000000),
-            blurRadius: 12,
-            offset: Offset(0, 5),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFFE8F5E9) : Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            border: selected
+                ? Border.all(color: const Color(0xFF1B5E20), width: 1.4)
+                : null,
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x12000000),
+                blurRadius: 12,
+                offset: Offset(0, 5),
+              ),
+            ],
           ),
-        ],
+          child: Row(
+            children: [
+              CircleAvatar(
+                backgroundColor: selected
+                    ? const Color(0xFFC8E6C9)
+                    : const Color(0xFFE8F5E9),
+                child: Text(
+                  '${stroke.packetId}',
+                  style: const TextStyle(color: Color(0xFF1B5E20)),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: compact
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Stroke ${stroke.packetId}',
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Impact ${metrics.faceAngleAtImpactLabel} • ${metrics.speedLabel} • Tempo ${metrics.tempoLabel}',
+                            style: TextStyle(color: Colors.grey.shade800),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Total ${_formatDurationMs(metrics.totalStrokeDurationMs)} • Back ${_formatDurationMs(metrics.backstrokeDurationMs)} • Forward ${_formatDurationMs(metrics.forwardStrokeDurationMs)} • ${metrics.impact} impact',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey.shade600,
+                            ),
+                          ),
+                        ],
+                      )
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Stroke ${stroke.packetId}',
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            '${metrics.faceAngleChangeLabel} change • ${metrics.impact} impact',
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Setup ${metrics.setupFaceAngleLabel} • Impact ${metrics.faceAngleAtImpactLabel}',
+                            style: TextStyle(color: Colors.grey.shade700),
+                          ),
+                          const SizedBox(height: 8),
+                          _MetricWrap(
+                            values: [
+                              'Impact ${metrics.faceAngleAtImpactLabel}',
+                              'Speed ${metrics.speedLabel}',
+                              'Tempo ${metrics.tempoLabel}',
+                              'Total ${_formatDurationMs(metrics.totalStrokeDurationMs)}',
+                              'Back ${_formatDurationMs(metrics.backstrokeDurationMs)}',
+                              'Forward ${_formatDurationMs(metrics.forwardStrokeDurationMs)}',
+                              '${metrics.impact} impact',
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Setup ${metrics.eventMarkers.setupMs}ms • Backstroke ${metrics.eventMarkers.motionStartMs}ms • Forward ${metrics.eventMarkers.transitionMs}ms • Impact ${metrics.eventMarkers.impactMs}ms • Follow ${metrics.eventMarkers.followThroughEndMs}ms',
+                            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                          ),
+                        ],
+                      ),
+              ),
+              Icon(selected ? Icons.expand_less : Icons.chevron_right),
+            ],
+          ),
+        ),
       ),
-      child: Row(
-        children: [
-          CircleAvatar(
-            backgroundColor: const Color(0xFFE8F5E9),
-            child: Text(
-              '${stroke.packetId}',
-              style: const TextStyle(color: Color(0xFF1B5E20)),
-            ),
+    );
+  }
+}
+
+class _StrokeSnapshotSection extends StatelessWidget {
+  const _StrokeSnapshotSection({
+    required this.title,
+    required this.stroke,
+    required this.emptySubtitle,
+  });
+
+  final String title;
+  final StoredStroke? stroke;
+  final String emptySubtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final metrics = _buildStrokeMetricCards(stroke);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w800,
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Stroke ${stroke.packetId}',
-                  style: const TextStyle(fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  '${metrics.faceAngleChangeLabel} change • ${metrics.impact} impact',
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Setup ${metrics.setupFaceAngleLabel} • Impact ${metrics.faceAngleAtImpactLabel}',
-                  style: TextStyle(color: Colors.grey.shade700),
-                ),
-                const SizedBox(height: 8),
-                _MetricWrap(
-                  values: [
-                    'Speed ${metrics.speedLabel}',
-                    'Back ${_formatDurationMs(metrics.backstrokeDurationMs)}',
-                    'Forward ${_formatDurationMs(metrics.forwardStrokeDurationMs)}',
-                    'Follow ${_formatDurationMs(metrics.followThroughDurationMs)}',
-                    'Total ${_formatDurationMs(metrics.totalStrokeDurationMs)}',
-                    'Peak accel ${metrics.peakAccelerationLabel}',
-                    'Peak stroke ${metrics.peakAngularVelocityLabel}',
-                    'Rotation ${metrics.clubRotationLabel}',
-                    'Strength ${metrics.impactStrengthLabel}',
-                    'Setup stable ${metrics.setupStabilityLabel}',
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Setup ${metrics.eventMarkers.setupMs}ms • Backstroke ${metrics.eventMarkers.motionStartMs}ms • Forward ${metrics.eventMarkers.transitionMs}ms • Impact ${metrics.eventMarkers.impactMs}ms • Follow ${metrics.eventMarkers.followThroughEndMs}ms',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                ),
-              ],
-            ),
-          ),
-          const Icon(Icons.chevron_right),
+        ),
+        if (stroke?.metrics.impact == 'Unknown') ...[
+          const SizedBox(height: 12),
+          const _ImpactWarningCard(),
         ],
-      ),
+        const SizedBox(height: 12),
+        if (stroke == null)
+          EmptyStateCard(
+            title: 'No stroke selected',
+            subtitle: emptySubtitle,
+          )
+        else
+          GridView.builder(
+            itemCount: metrics.length,
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              mainAxisSpacing: 12,
+              crossAxisSpacing: 12,
+              childAspectRatio: 1.18,
+            ),
+            itemBuilder: (context, index) => MetricCard(data: metrics[index]),
+          ),
+      ],
     );
   }
 }
@@ -2152,17 +1870,17 @@ List<MiniChartMarker> _strokePhaseMarkers(_LatestPuttSeries series) {
       color: const Color(0xFF1976D2),
     ),
     MiniChartMarker(
-      label: 'Backstroke',
+      label: _timedMarkerLabel('Backstroke', series.motionStartOffsetMs),
       ms: series.motionStartOffsetMs.toDouble(),
       color: const Color(0xFF2E7D32),
     ),
     MiniChartMarker(
-      label: 'Forward',
+      label: _timedMarkerLabel('Forward', series.transitionOffsetMs),
       ms: series.transitionOffsetMs.toDouble(),
       color: const Color(0xFF8E24AA),
     ),
     MiniChartMarker(
-      label: 'Impact',
+      label: _timedMarkerLabel('Impact', series.imuImpactOffsetMs),
       ms: series.imuImpactOffsetMs.toDouble(),
       color: const Color(0xFFEF6C00),
     ),
@@ -2172,19 +1890,414 @@ List<MiniChartMarker> _strokePhaseMarkers(_LatestPuttSeries series) {
 List<MiniChartMarker> _gyroPhaseMarkers(_LatestPuttSeries series) {
   return [
     MiniChartMarker(
-      label: 'Backstroke',
+      label: _timedMarkerLabel('Backstroke', series.motionStartOffsetMs),
       ms: series.motionStartOffsetMs.toDouble(),
       color: const Color(0xFF2E7D32),
     ),
     MiniChartMarker(
-      label: 'Forward',
+      label: _timedMarkerLabel('Forward', series.transitionOffsetMs),
       ms: series.transitionOffsetMs.toDouble(),
       color: const Color(0xFF8E24AA),
     ),
     MiniChartMarker(
-      label: 'Impact',
+      label: _timedMarkerLabel('Impact', series.imuImpactOffsetMs),
       ms: series.imuImpactOffsetMs.toDouble(),
       color: const Color(0xFFEF6C00),
+    ),
+  ];
+}
+
+String _timedMarkerLabel(String label, int offsetMs) {
+  return '$label ${offsetMs}ms';
+}
+
+List<MetricCardData> _buildStrokeMetricCards(StoredStroke? stroke) {
+  final latestPuttSeries = stroke == null ? null : _buildLatestPuttSeries(stroke);
+  final strokeMetrics = stroke?.metrics;
+
+  return [
+    MetricCardData(
+      title: 'Face Angle',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _impactValueLabel(
+              latestPuttSeries.gyroIntegratedFaceAnglePoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              suffix: '°',
+            ),
+      subtitle: stroke == null
+          ? 'Waiting for stroke'
+          : 'Integrated gyro Z at impact',
+      icon: Icons.track_changes,
+      chart: latestPuttSeries == null
+          ? null
+          : MiniChartData(
+              series: [
+                MiniChartSeries(
+                  label: 'Face',
+                  color: const Color(0xFF1B5E20),
+                  points: latestPuttSeries.gyroIntegratedFaceAnglePoints,
+                ),
+              ],
+              impactMs: latestPuttSeries.imuImpactOffsetMs.toDouble(),
+              referenceValue: 0,
+              minY: -30,
+              maxY: 30,
+              unitLabel: 'deg',
+              markers: _strokePhaseMarkers(latestPuttSeries),
+            ),
+    ),
+    MetricCardData(
+      title: 'Tempo Ratio',
+      value: strokeMetrics == null
+          ? 'No data'
+          : '${strokeMetrics.tempoRatio.toStringAsFixed(2)}:1',
+      subtitle: 'Backstroke to forward stroke',
+      icon: Icons.timelapse,
+    ),
+    MetricCardData(
+      title: 'Backstroke Duration',
+      value: strokeMetrics == null
+          ? 'No data'
+          : _formatDurationMs(strokeMetrics.backstrokeDurationMs),
+      subtitle: 'Backstroke start to forward start',
+      icon: Icons.arrow_back,
+    ),
+    MetricCardData(
+      title: 'Forward Duration',
+      value: strokeMetrics == null
+          ? 'No data'
+          : _formatDurationMs(strokeMetrics.forwardStrokeDurationMs),
+      subtitle: 'Forward start to impact',
+      icon: Icons.arrow_forward,
+    ),
+    MetricCardData(
+      title: 'Total Stroke Duration',
+      value: strokeMetrics == null
+          ? 'No data'
+          : _formatDurationMs(strokeMetrics.totalStrokeDurationMs),
+      subtitle: 'Backstroke start to follow-through end',
+      icon: Icons.schedule,
+    ),
+    MetricCardData(
+      title: 'Peak Stroke Angular Velocity',
+      value: strokeMetrics == null
+          ? 'No data'
+          : strokeMetrics.peakAngularVelocityLabel,
+      subtitle: 'Peak gyro Y rotation rate',
+      icon: Icons.speed,
+    ),
+    MetricCardData(
+      title: 'Stroke Speed',
+      value: strokeMetrics == null ? 'No data' : strokeMetrics.speedLabel,
+      subtitle: 'Impact speed along main putt axis',
+      icon: Icons.sports_score,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.speedPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              color: const Color(0xFF00695C),
+              label: 'Stroke Speed',
+              minY: -4.0,
+              maxY: 4.0,
+              unitLabel: 'm/s',
+              markers: _strokePhaseMarkers(latestPuttSeries),
+            ),
+    ),
+    MetricCardData(
+      title: 'Gyro X',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _impactValueLabel(
+              latestPuttSeries.gyroXPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              suffix: '°/s',
+              digits: 1,
+            ),
+      subtitle: 'Gyro X at impact',
+      icon: Icons.swap_horiz,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.gyroXPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              color: const Color(0xFF1565C0),
+              label: 'Gyro X',
+              minY: -60,
+              maxY: 60,
+              unitLabel: 'dps',
+              markers: _gyroPhaseMarkers(latestPuttSeries),
+            ),
+    ),
+    MetricCardData(
+      title: 'Push / Pull',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _impactValueLabel(
+              latestPuttSeries.gyroIntegratedXPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              suffix: '°',
+            ),
+      subtitle: 'Integrated gyro X through impact',
+      icon: Icons.compare_arrows,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.gyroIntegratedXPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              color: const Color(0xFF0D47A1),
+              label: 'Push / Pull (Gyro X)',
+              minY: -25,
+              maxY: 25,
+              unitLabel: 'deg',
+              markers: _gyroPhaseMarkers(latestPuttSeries),
+            ),
+    ),
+    MetricCardData(
+      title: 'Gyro Y',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _impactValueLabel(
+              latestPuttSeries.gyroYPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              suffix: '°/s',
+              digits: 1,
+            ),
+      subtitle: 'Gyro Y at impact',
+      icon: Icons.swap_vert,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.gyroYPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              color: const Color(0xFF2E7D32),
+              label: 'Gyro Y',
+              minY: -60,
+              maxY: 60,
+              unitLabel: 'dps',
+              markers: _gyroPhaseMarkers(latestPuttSeries),
+            ),
+    ),
+    MetricCardData(
+      title: 'Gyro Z',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _impactValueLabel(
+              latestPuttSeries.gyroZPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              suffix: '°/s',
+              digits: 1,
+            ),
+      subtitle: 'Gyro Z at impact',
+      icon: Icons.screen_rotation_alt,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.gyroZPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              color: const Color(0xFF8E24AA),
+              label: 'Gyro Z',
+              minY: -60,
+              maxY: 60,
+              unitLabel: 'dps',
+              markers: _gyroPhaseMarkers(latestPuttSeries),
+            ),
+    ),
+    MetricCardData(
+      title: 'Impact',
+      value: strokeMetrics?.impact ?? 'No data',
+      subtitle: 'Contact location',
+      icon: Icons.center_focus_strong,
+    ),
+    MetricCardData(
+      title: 'Ball Roll',
+      value: strokeMetrics?.rollStatus ?? 'Unavailable',
+      subtitle: 'Camera data not in v1',
+      icon: Icons.circle_outlined,
+    ),
+    MetricCardData(
+      title: 'Yaw',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _impactValueLabel(
+              latestPuttSeries.yawPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              suffix: '°',
+            ),
+      subtitle: 'Orientation over time',
+      icon: Icons.explore,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.yawPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              color: const Color(0xFF00897B),
+              label: 'Yaw',
+              minY: -30,
+              maxY: 30,
+              unitLabel: 'deg',
+            ),
+    ),
+    MetricCardData(
+      title: 'Pitch',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _impactValueLabel(
+              latestPuttSeries.pitchPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              suffix: '°',
+            ),
+      subtitle: 'Orientation over time',
+      icon: Icons.show_chart,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.pitchPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              color: const Color(0xFF5E35B1),
+              label: 'Pitch',
+              minY: -30,
+              maxY: 30,
+              unitLabel: 'deg',
+            ),
+    ),
+    MetricCardData(
+      title: 'Roll',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _impactValueLabel(
+              latestPuttSeries.rollPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              suffix: '°',
+            ),
+      subtitle: 'Orientation over time',
+      icon: Icons.rotate_right,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.rollPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              color: const Color(0xFF6D4C41),
+              label: 'Roll',
+              minY: -30,
+              maxY: 30,
+              unitLabel: 'deg',
+            ),
+    ),
+    MetricCardData(
+      title: 'Accel X',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _peakAbsLabel(
+              latestPuttSeries.accelXPoints,
+              suffix: 'm/s²',
+            ),
+      subtitle: 'Acceleration over time',
+      icon: Icons.trending_flat,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.accelXPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              color: const Color(0xFF3949AB),
+              label: 'Accel X',
+              minY: -10,
+              maxY: 10,
+              unitLabel: 'm/s²',
+            ),
+    ),
+    MetricCardData(
+      title: 'Accel Y',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _peakAbsLabel(
+              latestPuttSeries.accelYPoints,
+              suffix: 'm/s²',
+            ),
+      subtitle: 'Acceleration over time',
+      icon: Icons.swap_vert,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.accelYPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              color: const Color(0xFF00838F),
+              label: 'Accel Y',
+              minY: -10,
+              maxY: 10,
+              unitLabel: 'm/s²',
+            ),
+    ),
+    MetricCardData(
+      title: 'Accel Z',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _peakAbsLabel(
+              latestPuttSeries.accelZPoints,
+              suffix: 'm/s²',
+            ),
+      subtitle: 'Acceleration over time',
+      icon: Icons.height,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.accelZPoints,
+              impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+              color: const Color(0xFFE53935),
+              label: 'Accel Z',
+              minY: -10,
+              maxY: 10,
+              unitLabel: 'm/s²',
+            ),
+    ),
+    MetricCardData(
+      title: 'Piezo 1',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _impactValueLabel(
+              latestPuttSeries.piezo1Points,
+              impactOffsetMs: latestPuttSeries.piezoImpactOffsetMs,
+              suffix: '',
+              digits: 0,
+            ),
+      subtitle: 'Piezo channel over time',
+      icon: Icons.graphic_eq,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.piezo1Points,
+              impactOffsetMs: latestPuttSeries.piezoImpactOffsetMs,
+              color: const Color(0xFFFB8C00),
+              label: 'Piezo 1',
+              minY: 0,
+              maxY: 500,
+              unitLabel: 'raw',
+            ),
+    ),
+    MetricCardData(
+      title: 'Piezo 2',
+      value: latestPuttSeries == null
+          ? 'No data'
+          : _impactValueLabel(
+              latestPuttSeries.piezo2Points,
+              impactOffsetMs: latestPuttSeries.piezoImpactOffsetMs,
+              suffix: '',
+              digits: 0,
+            ),
+      subtitle: 'Piezo channel over time',
+      icon: Icons.multitrack_audio,
+      chart: latestPuttSeries == null
+          ? null
+          : _singleSeriesChart(
+              points: latestPuttSeries.piezo2Points,
+              impactOffsetMs: latestPuttSeries.piezoImpactOffsetMs,
+              color: const Color(0xFF8E24AA),
+              label: 'Piezo 2',
+              minY: 0,
+              maxY: 500,
+              unitLabel: 'raw',
+            ),
     ),
   ];
 }

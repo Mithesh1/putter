@@ -13,7 +13,7 @@ const double _accelImpactMinScore = 4.0;
 const double _piezoImpactMinDelta = 12.0;
 const double _piezoImpactAbsoluteThreshold = 300.0;
 const double _piezoContactAverageDelta = 30.0;
-const int _piezoContactWindowRadius = 5;
+const int _piezoContactWindowRadius = 3;
 const int _motionConfirmFrames = 3;
 const int _followThroughConfirmFrames = 2;
 
@@ -362,8 +362,8 @@ _PiezoResult _processPiezo(
   for (var idx = windowStart; idx <= windowEnd; idx++) {
     final toeRaw = idx < toePiezo.length ? toePiezo[idx].toDouble() : 0.0;
     final heelRaw = idx < heelPiezo.length ? heelPiezo[idx].toDouble() : 0.0;
-    toeWindowTotal += max(0.0, toeRaw - toeAverage);
-    heelWindowTotal += max(0.0, heelRaw - heelAverage);
+    toeWindowTotal += toeRaw;
+    heelWindowTotal += heelRaw;
     windowSamples++;
   }
 

@@ -53,6 +53,8 @@ class AppController {
       StreamController<String>.broadcast();
   final StreamController<String> _bleLatencyController =
       StreamController<String>.broadcast();
+  final StreamController<String> _impactToBleLatencyController =
+      StreamController<String>.broadcast();
 
   StreamSubscription<Uint8List>? _transportDataSubscription;
   StreamSubscription<BleConnectionState>? _transportStateSubscription;
@@ -79,9 +81,11 @@ class AppController {
   BleConnectionState get connectionState => _transport.connectionState;
   String _livePuttState = 'Idle';
   String _bleLatencyLabel = 'BLE latency unavailable';
+  String _impactToBleLatencyLabel = 'Impact -> BLE unavailable';
 
   String get livePuttState => _livePuttState;
   String get bleLatencyLabel => _bleLatencyLabel;
+  String get impactToBleLatencyLabel => _impactToBleLatencyLabel;
 
   Future<void> initialize() async {
     if (_isInitialized) {
@@ -105,6 +109,7 @@ class AppController {
     _syncStatusController.add(_syncService.status);
     _livePuttStateController.add(_livePuttState);
     _bleLatencyController.add(_bleLatencyLabel);
+    _impactToBleLatencyController.add(_impactToBleLatencyLabel);
     _syncStatusSubscription = _syncService.statusStream.listen(
       _syncStatusController.add,
     );
@@ -136,6 +141,9 @@ class AppController {
   Stream<String> watchLivePuttState() => _livePuttStateController.stream;
 
   Stream<String> watchBleLatency() => _bleLatencyController.stream;
+
+  Stream<String> watchImpactToBleLatency() =>
+      _impactToBleLatencyController.stream;
 
   Future<void> setTransportMode(TransportMode mode) async {
     if (_transportMode == mode) {
@@ -215,6 +223,8 @@ class AppController {
         _missedLatencyPings = 0;
         _bleLatencyLabel = 'BLE latency unavailable';
         _bleLatencyController.add(_bleLatencyLabel);
+        _impactToBleLatencyLabel = 'Impact -> BLE unavailable';
+        _impactToBleLatencyController.add(_impactToBleLatencyLabel);
       }
     });
     _transportDataSubscription = transport.dataStream.listen(
@@ -268,6 +278,9 @@ class AppController {
         reassembled.payload,
         expectedStrokeId: reassembled.strokeId,
       );
+      _impactToBleLatencyLabel =
+          'Impact -> BLE ${packet.impactToBleTxMs.toStringAsFixed(1)}ms';
+      _impactToBleLatencyController.add(_impactToBleLatencyLabel);
 
       final session = _activeSession ?? await _repository.getActiveSession();
       if (session == null) {
@@ -365,6 +378,7 @@ class AppController {
     await _diagnosticController.close();
     await _livePuttStateController.close();
     await _bleLatencyController.close();
+    await _impactToBleLatencyController.close();
   }
 
   String? _decodeLiveState(Uint8List bytes) {
