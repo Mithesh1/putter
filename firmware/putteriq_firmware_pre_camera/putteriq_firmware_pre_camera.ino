@@ -26,7 +26,7 @@ static const int PIN_I2C_SDA = 4;
 static const int PIN_I2C_SCL = 5;
 
 static const int PIN_PIEZO_1 = 6;
-static const int PIN_READY_BUTTON = 7;
+static const int PIN_READY_BUTTON = 44;
 static const int PIN_PIEZO_3 = 8;
 static const int PIN_IMU_INT = 17;
 static const int PIN_IMU_RST = 18;
@@ -1240,24 +1240,6 @@ static void handleReadyButton() {
   }
 }
 
-static void handleSerialArmCommand() {
-  while (Serial.available() > 0) {
-    const int incoming = Serial.read();
-    Serial.print("Serial byte received: ");
-    Serial.print(incoming);
-    if (incoming >= 32 && incoming <= 126) {
-      Serial.print(" ('");
-      Serial.write((char)incoming);
-      Serial.print("')");
-    }
-    Serial.println();
-    if (incoming == ' ') {
-      Serial.println("Serial space trigger accepted");
-      armReadyWindow();
-    }
-  }
-}
-
 static void updatePuttStateMachine() {
   const uint32_t now_ms = millis();
   const float stroke_rate_dps =
@@ -1659,7 +1641,6 @@ void setup() {
 void loop() {
   processBnoEvents();
   handleReadyButton();
-  handleSerialArmCommand();
 
   const uint32_t now_us = micros();
 

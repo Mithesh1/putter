@@ -65,6 +65,49 @@ class BallData {
   }
 }
 
+class BallTimeSeries {
+  final double fps;
+  final List<double> velocityMph;
+  final List<double> rotationRateDegS;
+  final DateTime receivedAt;
+
+  const BallTimeSeries({
+    required this.fps,
+    required this.velocityMph,
+    required this.rotationRateDegS,
+    required this.receivedAt,
+  });
+
+  factory BallTimeSeries.fromBytes(Uint8List bytes) {
+    final bd = ByteData.sublistView(bytes);
+    final count = bd.getUint8(0);
+    final fps = bd.getFloat32(1, Endian.little);
+    final expectedLength = 5 + (4 * count);
+    if (bytes.length < expectedLength) {
+      throw const FormatException('Short ball time-series packet');
+    }
+
+    final velocity = <double>[];
+    final rotation = <double>[];
+    var offset = 5;
+    for (var index = 0; index < count; index++) {
+      velocity.add(bd.getInt16(offset, Endian.little) / 100.0);
+      offset += 2;
+    }
+    for (var index = 0; index < count; index++) {
+      rotation.add(bd.getInt16(offset, Endian.little) / 10.0);
+      offset += 2;
+    }
+
+    return BallTimeSeries(
+      fps: fps,
+      velocityMph: List<double>.unmodifiable(velocity),
+      rotationRateDegS: List<double>.unmodifiable(rotation),
+      receivedAt: DateTime.now(),
+    );
+  }
+}
+
 class BallDataService {
   static final BallDataService instance = BallDataService._();
   BallDataService._();
@@ -72,9 +115,12 @@ class BallDataService {
   static const String _targetDeviceName = 'BurstAnalyzer';
   static const String _serviceUuid = '12340000-0000-4b59-9000-000000000001';
   static const String _charUuid = '12340000-0000-4b59-9000-000000000002';
+  static const String _timeseriesCharUuid =
+      '12340000-0000-4b59-9000-000000000004';
 
   final _ble = FlutterReactiveBle();
   final _controller = StreamController<BallData>.broadcast();
+  final _timeseriesController = StreamController<BallTimeSeries>.broadcast();
   final _historyController = StreamController<List<BallData>>.broadcast();
   final _debugController = StreamController<String>.broadcast();
 
@@ -82,16 +128,20 @@ class BallDataService {
   StreamSubscription<DiscoveredDevice>? _scanSub;
   StreamSubscription<ConnectionStateUpdate>? _connSub;
   StreamSubscription<List<int>>? _notifySub;
+  StreamSubscription<List<int>>? _timeseriesSub;
   bool _started = false;
   bool _disposed = false;
   BallData? _latestBallData;
+  BallTimeSeries? _latestTimeSeries;
   final List<BallData> _history = <BallData>[];
   final Set<String> _seenScanIds = <String>{};
   static const int _maxHistoryPackets = 24;
 
   Stream<BallData> get stream => _controller.stream;
+  Stream<BallTimeSeries> get timeseriesStream => _timeseriesController.stream;
   Stream<List<BallData>> get historyStream => _historyController.stream;
   BallData? get latestBallData => _latestBallData;
+  BallTimeSeries? get latestTimeSeries => _latestTimeSeries;
   List<BallData> get recentHistory => List<BallData>.unmodifiable(_history);
   Stream<String> get debugStream => _debugController.stream;
   String _latestDebugMessage = 'Idle';
@@ -115,6 +165,13 @@ class BallDataService {
   }
 
   Future<void> stop() async {
+    if (!_started &&
+        _scanSub == null &&
+        _connSub == null &&
+        _notifySub == null &&
+        _timeseriesSub == null) {
+      return;
+    }
     _started = false;
     _emitDebug('Ball service stopped');
     await _cancelTransientWork();
@@ -149,6 +206,8 @@ class BallDataService {
     _connSub = null;
     await _notifySub?.cancel();
     _notifySub = null;
+    await _timeseriesSub?.cancel();
+    _timeseriesSub = null;
   }
 
   void _scan() {
@@ -224,10 +283,13 @@ class BallDataService {
       if (update.connectionState == DeviceConnectionState.connected) {
         _emitDebug('Ball device connected');
         _subscribe(deviceId);
+        _subscribeTimeseries(deviceId);
       } else if (update.connectionState == DeviceConnectionState.disconnected) {
         _emitDebug('Ball device disconnected');
         _notifySub?.cancel();
         _notifySub = null;
+        _timeseriesSub?.cancel();
+        _timeseriesSub = null;
         _connSub = null;
         if (!_disposed) {
           Future.delayed(const Duration(seconds: 5), _scan);
@@ -271,9 +333,41 @@ class BallDataService {
         );
   }
 
+  void _subscribeTimeseries(String deviceId) {
+    final characteristic = QualifiedCharacteristic(
+      serviceId: Uuid.parse(_serviceUuid),
+      characteristicId: Uuid.parse(_timeseriesCharUuid),
+      deviceId: deviceId,
+    );
+    _emitDebug('Subscribed to ball time series');
+    _timeseriesSub = _ble.subscribeToCharacteristic(characteristic).listen(
+      (bytes) {
+        if (bytes.length < 5) {
+          _emitDebug('Short ball time-series packet: ${bytes.length}B');
+          return;
+        }
+        try {
+          final timeSeries = BallTimeSeries.fromBytes(Uint8List.fromList(bytes));
+          _latestTimeSeries = timeSeries;
+          _emitDebug(
+            'Ball time series ${bytes.length}B: '
+            '${timeSeries.velocityMph.length} samples @ ${timeSeries.fps.toStringAsFixed(1)} fps',
+          );
+          _timeseriesController.add(timeSeries);
+        } on FormatException {
+          _emitDebug('Malformed ball time-series packet: ${bytes.length}B');
+        }
+      },
+      onError: (_) {
+        _emitDebug('Ball time-series stream error');
+      },
+    );
+  }
+
   Future<void> dispose() async {
     _disposed = true;
     await stop();
+    await _timeseriesController.close();
     await _historyController.close();
     await _debugController.close();
     await _controller.close();

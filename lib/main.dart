@@ -37,13 +37,13 @@ class _PutterAppState extends State<PutterApp> {
 
   void _syncBallDataService(BleConnectionState state) {
     switch (state) {
+      case BleConnectionState.connected:
+        BallDataService.instance.start();
+        break;
       case BleConnectionState.scanning:
       case BleConnectionState.connecting:
-        unawaited(BallDataService.instance.stop());
-        break;
-      case BleConnectionState.connected:
       case BleConnectionState.disconnected:
-        BallDataService.instance.start();
+        unawaited(BallDataService.instance.stop());
         break;
     }
   }
@@ -184,11 +184,11 @@ class DashboardPage extends StatelessWidget {
       initialData: BallDataService.instance.latestBallData,
       builder: (context, ballSnapshot) {
         final ballData = ballSnapshot.data;
-        return StreamBuilder<List<BallData>>(
-          stream: BallDataService.instance.historyStream,
-          initialData: BallDataService.instance.recentHistory,
-          builder: (context, ballHistorySnapshot) {
-            final ballHistory = ballHistorySnapshot.data ?? const <BallData>[];
+        return StreamBuilder<BallTimeSeries>(
+          stream: BallDataService.instance.timeseriesStream,
+          initialData: BallDataService.instance.latestTimeSeries,
+          builder: (context, ballTimeSeriesSnapshot) {
+            final ballTimeSeries = ballTimeSeriesSnapshot.data;
             return StreamBuilder<String>(
               stream: BallDataService.instance.debugStream,
               initialData: BallDataService.instance.latestDebugMessage,
@@ -289,17 +289,14 @@ class DashboardPage extends StatelessWidget {
                                                               ? 'Waiting for burst'
                                                               : 'Peak ${ballData.peakVelocityMph.toStringAsFixed(1)} mph',
                                                           icon: Icons.speed,
-                                                          chart: ballHistory.isEmpty
+                                                          chart: ballTimeSeries == null
                                                               ? null
-                                                              : _ballHistoryChart(
-                                                                  points: _ballHistoryPoints(
-                                                                    ballHistory,
-                                                                    (data) => data.avgVelocityMph,
-                                                                  ),
+                                                              : _ballTimeSeriesChart(
+                                                                  timeSeries: ballTimeSeries,
+                                                                  values: ballTimeSeries.velocityMph,
                                                                   label: 'Ball Speed',
                                                                   color: const Color(0xFF00897B),
                                                                   unitLabel: 'mph',
-                                                                  referenceValue: 0,
                                                                 ),
                                                         ),
                                                         BallMetricTrendCard(
@@ -311,17 +308,14 @@ class DashboardPage extends StatelessWidget {
                                                               ? 'Waiting for burst'
                                                               : 'Wobble ${ballData.wobbleMagnitudeDeg.toStringAsFixed(1)}°',
                                                           icon: Icons.sync,
-                                                          chart: ballHistory.isEmpty
+                                                          chart: ballTimeSeries == null
                                                               ? null
-                                                              : _ballHistoryChart(
-                                                                  points: _ballHistoryPoints(
-                                                                    ballHistory,
-                                                                    (data) => data.rotationRateDegS,
-                                                                  ),
+                                                              : _ballTimeSeriesChart(
+                                                                  timeSeries: ballTimeSeries,
+                                                                  values: ballTimeSeries.rotationRateDegS,
                                                                   label: 'Spin',
                                                                   color: const Color(0xFF6A1B9A),
                                                                   unitLabel: 'dps',
-                                                                  referenceValue: 0,
                                                                 ),
                                                         ),
                                                       ],
@@ -1078,14 +1072,162 @@ class MiniChartMarker {
   });
 }
 
-class MiniMetricChart extends StatelessWidget {
+class _MiniChartLayout {
+  final double leftPad;
+  final double topPad;
+  final double rightPad;
+  final double bottomPad;
+  final double chartWidth;
+  final double chartHeight;
+  final double minX;
+  final double maxX;
+  final double plotMinY;
+  final double plotMaxY;
+
+  const _MiniChartLayout({
+    required this.leftPad,
+    required this.topPad,
+    required this.rightPad,
+    required this.bottomPad,
+    required this.chartWidth,
+    required this.chartHeight,
+    required this.minX,
+    required this.maxX,
+    required this.plotMinY,
+    required this.plotMaxY,
+  });
+
+  double xFor(double ms) {
+    if (maxX <= minX) {
+      return leftPad;
+    }
+    return leftPad + ((ms - minX) / (maxX - minX)) * chartWidth;
+  }
+
+  double yFor(double value) {
+    final denominator = plotMaxY - plotMinY;
+    if (denominator.abs() < 1e-6) {
+      return topPad + (chartHeight / 2);
+    }
+    final normalized = (value - plotMinY) / denominator;
+    return topPad + (1.0 - normalized) * chartHeight;
+  }
+
+  double msForX(double x) {
+    if (chartWidth <= 0 || maxX <= minX) {
+      return minX;
+    }
+    final clampedX = x.clamp(leftPad, leftPad + chartWidth);
+    return minX + ((clampedX - leftPad) / chartWidth) * (maxX - minX);
+  }
+}
+
+class _MiniChartSelection {
+  final double ms;
+  final List<ChartPoint> points;
+
+  const _MiniChartSelection({
+    required this.ms,
+    required this.points,
+  });
+}
+
+_MiniChartLayout? _buildMiniChartLayout(MiniChartData data, Size size) {
+  const leftPad = 30.0;
+  const topPad = 4.0;
+  const rightPad = 4.0;
+  const bottomPad = 18.0;
+  final chartWidth = size.width - leftPad - rightPad;
+  final chartHeight = size.height - topPad - bottomPad;
+  if (chartWidth <= 0 || chartHeight <= 0) {
+    return null;
+  }
+
+  final populatedSeries =
+      data.series.where((series) => series.points.isNotEmpty).toList();
+  if (populatedSeries.isEmpty) {
+    return null;
+  }
+
+  final minX = data.minX ?? populatedSeries.first.points.first.ms;
+  final maxX = data.maxX ?? populatedSeries.first.points.last.ms;
+  final rawMinY = data.minY ??
+      populatedSeries
+          .expand((series) => series.points)
+          .map((point) => point.value)
+          .reduce(math.min);
+  final rawMaxY = data.maxY ??
+      populatedSeries
+          .expand((series) => series.points)
+          .map((point) => point.value)
+          .reduce(math.max);
+  final plotMinY = rawMinY == rawMaxY ? rawMinY - 1.0 : rawMinY;
+  final plotMaxY = rawMinY == rawMaxY ? rawMaxY + 1.0 : rawMaxY;
+  return _MiniChartLayout(
+    leftPad: leftPad,
+    topPad: topPad,
+    rightPad: rightPad,
+    bottomPad: bottomPad,
+    chartWidth: chartWidth,
+    chartHeight: chartHeight,
+    minX: minX,
+    maxX: maxX,
+    plotMinY: plotMinY,
+    plotMaxY: plotMaxY,
+  );
+}
+
+class MiniMetricChart extends StatefulWidget {
   const MiniMetricChart({super.key, required this.data});
 
   final MiniChartData data;
 
   @override
+  State<MiniMetricChart> createState() => _MiniMetricChartState();
+}
+
+class _MiniMetricChartState extends State<MiniMetricChart> {
+  _MiniChartSelection? _selection;
+
+  void _updateSelection(Offset localPosition, Size size) {
+    final layout = _buildMiniChartLayout(widget.data, size);
+    if (layout == null) {
+      return;
+    }
+    final targetMs = layout.msForX(localPosition.dx);
+    final selectedPoints = widget.data.series
+        .where((series) => series.points.isNotEmpty)
+        .map((series) {
+          return series.points.reduce((best, current) {
+            final bestDelta = (best.ms - targetMs).abs();
+            final currentDelta = (current.ms - targetMs).abs();
+            return currentDelta < bestDelta ? current : best;
+          });
+        })
+        .toList(growable: false);
+    if (selectedPoints.isEmpty) {
+      return;
+    }
+    setState(() {
+      _selection = _MiniChartSelection(
+        ms: selectedPoints.first.ms,
+        points: selectedPoints,
+      );
+    });
+  }
+
+  void _clearSelection() {
+    if (_selection == null) {
+      return;
+    }
+    setState(() {
+      _selection = null;
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final longestSeriesPoints = data.series.fold<int>(
+    final longestSeriesPoints = widget.data.series.fold<int>(
       0,
       (best, series) => math.max(best, series.points.length),
     );
@@ -1108,10 +1250,72 @@ class MiniMetricChart extends StatelessWidget {
         color: const Color(0xFFF1F5F3),
         borderRadius: BorderRadius.circular(14),
       ),
-      padding: const EdgeInsets.all(8),
-      child: CustomPaint(
-        painter: _MiniMetricChartPainter(data),
-        child: const SizedBox.expand(),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final size = Size(constraints.maxWidth, constraints.maxHeight);
+          final layout = _buildMiniChartLayout(widget.data, size);
+          final selection = _selection;
+          final selectionX = layout == null || selection == null
+              ? null
+              : layout.xFor(selection.ms);
+          final tooltipText = selection == null
+              ? null
+              : _buildSelectionTooltip(widget.data, selection);
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (details) => _updateSelection(details.localPosition, size),
+            onHorizontalDragStart: (details) =>
+                _updateSelection(details.localPosition, size),
+            onHorizontalDragUpdate: (details) =>
+                _updateSelection(details.localPosition, size),
+            onHorizontalDragEnd: (_) => _clearSelection(),
+            onHorizontalDragCancel: _clearSelection,
+            onTapUp: (_) => _clearSelection(),
+            onTapCancel: _clearSelection,
+            child: Stack(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: CustomPaint(
+                    painter: _MiniMetricChartPainter(
+                      widget.data,
+                      selection: selection,
+                    ),
+                    child: const SizedBox.expand(),
+                  ),
+                ),
+                if (layout != null && selection != null && selectionX != null)
+                  Positioned(
+                    left: (selectionX - 46).clamp(
+                      layout.leftPad,
+                      size.width - 96,
+                    ),
+                    top: 6,
+                    child: Container(
+                      constraints: const BoxConstraints(maxWidth: 92),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xE61B1F24),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        tooltipText ?? '',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w700,
+                          height: 1.25,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
@@ -1161,27 +1365,42 @@ class _MiniChartLegend extends StatelessWidget {
   }
 }
 
+String _formatMiniChartValue(String unitLabel, double value) {
+  if (unitLabel == 'dps' || unitLabel == 'raw') {
+    return value.toStringAsFixed(0);
+  }
+  if (unitLabel == 'm/s²' || unitLabel == 'm/s' || unitLabel == 'mph') {
+    return value.toStringAsFixed(2);
+  }
+  return value.toStringAsFixed(1);
+}
+
+String _buildSelectionTooltip(MiniChartData data, _MiniChartSelection selection) {
+  final buffer = StringBuffer('${selection.ms.round()}ms');
+  for (var index = 0; index < selection.points.length; index++) {
+    final point = selection.points[index];
+    final series = data.series[index];
+    buffer.write(
+      '\n${series.label}: ${_formatMiniChartValue(data.unitLabel, point.value)} ${data.unitLabel}',
+    );
+  }
+  return buffer.toString();
+}
+
 class _MiniMetricChartPainter extends CustomPainter {
-  _MiniMetricChartPainter(this.data);
+  _MiniMetricChartPainter(this.data, {this.selection});
 
   final MiniChartData data;
+  final _MiniChartSelection? selection;
 
   String _formatYAxisValue(double value) {
-    if (data.unitLabel == 'dps' || data.unitLabel == 'raw') {
-      return value.toStringAsFixed(0);
-    }
-    return value.toStringAsFixed(1);
+    return _formatMiniChartValue(data.unitLabel, value);
   }
 
   @override
   void paint(Canvas canvas, Size size) {
-    final leftPad = 30.0;
-    final topPad = 4.0;
-    final rightPad = 4.0;
-    final bottomPad = 18.0;
-    final chartWidth = size.width - leftPad - rightPad;
-    final chartHeight = size.height - topPad - bottomPad;
-    if (chartWidth <= 0 || chartHeight <= 0) {
+    final layout = _buildMiniChartLayout(data, size);
+    if (layout == null) {
       return;
     }
 
@@ -1191,48 +1410,25 @@ class _MiniMetricChartPainter extends CustomPainter {
       return;
     }
 
-    final minX = data.minX ?? populatedSeries.first.points.first.ms;
-    final maxX = data.maxX ?? populatedSeries.first.points.last.ms;
-    final minY = data.minY ??
-        populatedSeries
-        .expand((series) => series.points)
-        .map((point) => point.value)
-        .reduce(math.min);
-    final maxY = data.maxY ??
-        populatedSeries
-        .expand((series) => series.points)
-        .map((point) => point.value)
-        .reduce(math.max);
-    final plotMinY = minY;
-    final plotMaxY = maxY;
-
-    double xFor(double ms) {
-      if (maxX <= minX) {
-        return leftPad;
-      }
-      return leftPad + ((ms - minX) / (maxX - minX)) * chartWidth;
-    }
-
-    double yFor(double value) {
-      final normalized = (value - plotMinY) / (plotMaxY - plotMinY);
-      return topPad + (1.0 - normalized) * chartHeight;
-    }
-
     final refPaint = Paint()
       ..color = const Color(0xFF90A4AE)
       ..strokeWidth = 1.5;
-    final referenceY = yFor(data.referenceValue);
+    final referenceY = layout.yFor(data.referenceValue);
     final axisLabelStyle = TextStyle(
       color: Colors.grey.shade600,
       fontSize: 9,
       fontWeight: FontWeight.w600,
     );
     final yAxisValues = <double>[
-      plotMaxY,
-      data.referenceValue.clamp(plotMinY, plotMaxY),
-      plotMinY,
+      layout.plotMaxY,
+      data.referenceValue.clamp(layout.plotMinY, layout.plotMaxY),
+      layout.plotMinY,
     ];
-    final xAxisValues = <double>[minX, (minX + maxX) / 2.0, maxX];
+    final xAxisValues = <double>[
+      layout.minX,
+      (layout.minX + layout.maxX) / 2.0,
+      layout.maxX,
+    ];
 
     for (final axisValue in yAxisValues) {
       final labelPainter = TextPainter(
@@ -1242,16 +1438,16 @@ class _MiniMetricChartPainter extends CustomPainter {
         ),
         textDirection: TextDirection.ltr,
       )..layout();
-      final y = (yFor(axisValue) - (labelPainter.height / 2)).clamp(
-        topPad,
-        topPad + chartHeight - labelPainter.height,
+      final y = (layout.yFor(axisValue) - (labelPainter.height / 2)).clamp(
+        layout.topPad,
+        layout.topPad + layout.chartHeight - labelPainter.height,
       );
       labelPainter.paint(canvas, Offset(2, y));
     }
 
     canvas.drawLine(
-      Offset(leftPad, referenceY),
-      Offset(leftPad + chartWidth, referenceY),
+      Offset(layout.leftPad, referenceY),
+      Offset(layout.leftPad + layout.chartWidth, referenceY),
       refPaint,
     );
 
@@ -1263,11 +1459,14 @@ class _MiniMetricChartPainter extends CustomPainter {
         ),
         textDirection: TextDirection.ltr,
       )..layout();
-      final x = (xFor(axisValue) - (labelPainter.width / 2)).clamp(
-        leftPad,
-        leftPad + chartWidth - labelPainter.width,
+      final x = (layout.xFor(axisValue) - (labelPainter.width / 2)).clamp(
+        layout.leftPad,
+        layout.leftPad + layout.chartWidth - labelPainter.width,
       );
-      labelPainter.paint(canvas, Offset(x, topPad + chartHeight + 2));
+      labelPainter.paint(
+        canvas,
+        Offset(x, layout.topPad + layout.chartHeight + 2),
+      );
     }
 
     final markerLabelPositions = <double>[];
@@ -1275,10 +1474,10 @@ class _MiniMetricChartPainter extends CustomPainter {
       final markerPaint = Paint()
         ..color = marker.color
         ..strokeWidth = 2;
-      final markerX = xFor(marker.ms.clamp(minX, maxX));
+      final markerX = layout.xFor(marker.ms.clamp(layout.minX, layout.maxX));
       canvas.drawLine(
-        Offset(markerX, topPad),
-        Offset(markerX, topPad + chartHeight),
+        Offset(markerX, layout.topPad),
+        Offset(markerX, layout.topPad + layout.chartHeight),
         markerPaint,
       );
 
@@ -1294,18 +1493,30 @@ class _MiniMetricChartPainter extends CustomPainter {
         textDirection: TextDirection.ltr,
       )..layout();
       final markerLabelY = markerLabelPositions.isEmpty
-          ? topPad
+          ? layout.topPad
           : markerLabelPositions.last + 12;
       markerLabelPositions.add(markerLabelY);
       markerTextPainter.paint(
         canvas,
         Offset(
           (markerX + 4).clamp(
-            leftPad,
-            leftPad + chartWidth - markerTextPainter.width,
+            layout.leftPad,
+            layout.leftPad + layout.chartWidth - markerTextPainter.width,
           ),
           markerLabelY,
         ),
+      );
+    }
+
+    if (selection != null) {
+      final selectionPaint = Paint()
+        ..color = const Color(0xFF263238)
+        ..strokeWidth = 1.4;
+      final selectionX = layout.xFor(selection!.ms);
+      canvas.drawLine(
+        Offset(selectionX, layout.topPad),
+        Offset(selectionX, layout.topPad + layout.chartHeight),
+        selectionPaint,
       );
     }
 
@@ -1319,9 +1530,12 @@ class _MiniMetricChartPainter extends CustomPainter {
         ..strokeJoin = StrokeJoin.round;
 
       final path = Path()
-        ..moveTo(xFor(series.points.first.ms), yFor(series.points.first.value));
+        ..moveTo(
+          layout.xFor(series.points.first.ms),
+          layout.yFor(series.points.first.value),
+        );
       for (final point in series.points.skip(1)) {
-        path.lineTo(xFor(point.ms), yFor(point.value));
+        path.lineTo(layout.xFor(point.ms), layout.yFor(point.value));
       }
       canvas.drawPath(path, linePaint);
 
@@ -1331,8 +1545,8 @@ class _MiniMetricChartPainter extends CustomPainter {
         return currentDelta < bestDelta ? current : best;
       });
       final impactOffset = Offset(
-        xFor(impactPoint.ms),
-        yFor(impactPoint.value),
+        layout.xFor(impactPoint.ms),
+        layout.yFor(impactPoint.value),
       );
       canvas.drawCircle(
         impactOffset,
@@ -1349,8 +1563,28 @@ class _MiniMetricChartPainter extends CustomPainter {
             ..strokeWidth = 2,
         );
       }
-    }
 
+      if (selection != null && seriesIndex < selection!.points.length) {
+        final selectedPoint = selection!.points[seriesIndex];
+        final selectedOffset = Offset(
+          layout.xFor(selectedPoint.ms),
+          layout.yFor(selectedPoint.value),
+        );
+        canvas.drawCircle(
+          selectedOffset,
+          4.0,
+          Paint()..color = series.color,
+        );
+        canvas.drawCircle(
+          selectedOffset,
+          7.0,
+          Paint()
+            ..color = series.color.withOpacity(0.18)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2.4,
+        );
+      }
+    }
   }
 
   @override
@@ -1511,6 +1745,18 @@ class MiniStat extends StatelessWidget {
   }
 }
 
+String _sessionPreviewFaceAngleLabel(StoredStroke stroke) {
+  final latestPuttSeries = _buildLatestPuttSeries(stroke);
+  if (latestPuttSeries == null) {
+    return stroke.metrics.faceAngleAtImpactLabel;
+  }
+  return _impactValueLabel(
+    latestPuttSeries.gyroIntegratedFaceAnglePoints,
+    impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
+    suffix: '°',
+  );
+}
+
 class StrokeListItem extends StatelessWidget {
   const StrokeListItem({
     super.key,
@@ -1528,6 +1774,16 @@ class StrokeListItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final metrics = stroke.metrics;
+    final faceAnglePreview = _sessionPreviewFaceAngleLabel(stroke);
+    final summaryBubbles = [
+      'Face $faceAnglePreview',
+      'Speed ${metrics.speedLabel}',
+      'Tempo ${metrics.tempoLabel}',
+      'Total ${_formatDurationMs(metrics.totalStrokeDurationMs)}',
+      'Back ${_formatDurationMs(metrics.backstrokeDurationMs)}',
+      'Forward ${_formatDurationMs(metrics.forwardStrokeDurationMs)}',
+      '${metrics.impact} impact',
+    ];
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -1562,64 +1818,17 @@ class StrokeListItem extends StatelessWidget {
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: compact
-                    ? Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Stroke ${stroke.packetId}',
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Impact ${metrics.faceAngleAtImpactLabel} • ${metrics.speedLabel} • Tempo ${metrics.tempoLabel}',
-                            style: TextStyle(color: Colors.grey.shade800),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Total ${_formatDurationMs(metrics.totalStrokeDurationMs)} • Back ${_formatDurationMs(metrics.backstrokeDurationMs)} • Forward ${_formatDurationMs(metrics.forwardStrokeDurationMs)} • ${metrics.impact} impact',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey.shade600,
-                            ),
-                          ),
-                        ],
-                      )
-                    : Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Stroke ${stroke.packetId}',
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            '${metrics.faceAngleChangeLabel} change • ${metrics.impact} impact',
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Setup ${metrics.setupFaceAngleLabel} • Impact ${metrics.faceAngleAtImpactLabel}',
-                            style: TextStyle(color: Colors.grey.shade700),
-                          ),
-                          const SizedBox(height: 8),
-                          _MetricWrap(
-                            values: [
-                              'Impact ${metrics.faceAngleAtImpactLabel}',
-                              'Speed ${metrics.speedLabel}',
-                              'Tempo ${metrics.tempoLabel}',
-                              'Total ${_formatDurationMs(metrics.totalStrokeDurationMs)}',
-                              'Back ${_formatDurationMs(metrics.backstrokeDurationMs)}',
-                              'Forward ${_formatDurationMs(metrics.forwardStrokeDurationMs)}',
-                              '${metrics.impact} impact',
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'Setup ${metrics.eventMarkers.setupMs}ms • Backstroke ${metrics.eventMarkers.motionStartMs}ms • Forward ${metrics.eventMarkers.transitionMs}ms • Impact ${metrics.eventMarkers.impactMs}ms • Follow ${metrics.eventMarkers.followThroughEndMs}ms',
-                            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                          ),
-                        ],
-                      ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Stroke ${stroke.packetId}',
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 8),
+                    _MetricWrap(values: summaryBubbles),
+                  ],
+                ),
               ),
               Icon(selected ? Icons.expand_less : Icons.chevron_right),
             ],
@@ -2119,29 +2328,31 @@ class ChartPoint {
   const ChartPoint({required this.ms, required this.value});
 }
 
-List<ChartPoint> _ballHistoryPoints(
-  List<BallData> history,
-  double Function(BallData data) selector,
+List<ChartPoint> _ballTimeSeriesPoints(
+  BallTimeSeries timeSeries,
+  List<double> values,
 ) {
-  if (history.isEmpty) {
+  if (values.isEmpty || timeSeries.fps <= 0) {
     return const <ChartPoint>[];
   }
-  final first = history.first.receivedAt;
   return List<ChartPoint>.unmodifiable(
-    history.map((data) {
-      final ms = data.receivedAt.difference(first).inMilliseconds.toDouble();
-      return ChartPoint(ms: ms, value: selector(data));
+    List<ChartPoint>.generate(values.length, (index) {
+      return ChartPoint(
+        ms: index * 1000.0 / timeSeries.fps,
+        value: values[index],
+      );
     }),
   );
 }
 
-MiniChartData _ballHistoryChart({
-  required List<ChartPoint> points,
+MiniChartData _ballTimeSeriesChart({
+  required BallTimeSeries timeSeries,
+  required List<double> values,
   required String label,
   required Color color,
   required String unitLabel,
-  required double referenceValue,
 }) {
+  final points = _ballTimeSeriesPoints(timeSeries, values);
   final lastMs = points.isEmpty ? 0.0 : points.last.ms;
   return MiniChartData(
     series: [
@@ -2152,7 +2363,7 @@ MiniChartData _ballHistoryChart({
       ),
     ],
     impactMs: lastMs,
-    referenceValue: referenceValue,
+    referenceValue: 0,
     minX: 0,
     maxX: math.max(lastMs, 1),
     unitLabel: unitLabel,

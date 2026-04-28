@@ -7,12 +7,13 @@ const double _gravityMps2 = 9.80665;
 const double _backstrokeThresholdDps = 20.0;
 const double _forwardStrokeThresholdDps = -10.0;
 const double _followThroughEndThresholdDps = -1.0;
-const double _centerImpactRatioThreshold = 0.12;
 const double _accelImpactMinDeltaG = 0.35;
 const double _accelImpactMinScore = 4.0;
 const double _piezoImpactMinDelta = 12.0;
 const double _piezoImpactAbsoluteThreshold = 300.0;
-const double _piezoContactAverageDelta = 30.0;
+const double _piezoContactAverageDelta = 45.0;
+const double _piezoContactRelativeDeltaThreshold = 0.20;
+const double _piezoContactMinStrength = 35.0;
 const int _piezoContactWindowRadius = 3;
 const int _motionConfirmFrames = 3;
 const int _followThroughConfirmFrames = 2;
@@ -371,22 +372,23 @@ _PiezoResult _processPiezo(
       windowSamples == 0 ? 0.0 : toeWindowTotal / windowSamples;
   final heelWindowAverage =
       windowSamples == 0 ? 0.0 : heelWindowTotal / windowSamples;
+  final averageDifference = (toeWindowAverage - heelWindowAverage).abs();
+  final relativeDifference =
+      averageDifference / (toeWindowAverage + heelWindowAverage + 1e-6);
+  final clearSideSignal =
+      bestAbsolutePeak >= _piezoImpactAbsoluteThreshold ||
+      impactStrength >= _piezoContactMinStrength;
 
   String impactLabel;
   if (!impactFound) {
     impactLabel = 'Unknown';
-  } else if (weakImpact) {
+  } else if (weakImpact || !clearSideSignal) {
     impactLabel = 'Center';
-  } else if (toeWindowAverage > heelWindowAverage + _piezoContactAverageDelta) {
-    impactLabel = 'Toe';
-  } else if (heelWindowAverage > toeWindowAverage + _piezoContactAverageDelta) {
-    impactLabel = 'Heel';
+  } else if (averageDifference < _piezoContactAverageDelta ||
+      relativeDifference < _piezoContactRelativeDeltaThreshold) {
+    impactLabel = 'Center';
   } else {
-    final rho =
-        (bestToeDelta - bestHeelDelta) / (bestToeDelta + bestHeelDelta + 1e-6);
-    impactLabel = rho.abs() < _centerImpactRatioThreshold
-        ? 'Center'
-        : (rho > 0.0 ? 'Toe' : 'Heel');
+    impactLabel = toeWindowAverage > heelWindowAverage ? 'Toe' : 'Heel';
   }
 
   return _PiezoResult(
