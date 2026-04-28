@@ -75,6 +75,7 @@ SIGNATURE_BLEND = 0.20
 BLE_DEVICE_NAME = "BurstAnalyzer"
 BALL_DATA_SERVICE_UUID = "12340000-0000-4b59-9000-000000000001"
 BALL_DATA_CHAR_UUID = "12340000-0000-4b59-9000-000000000002"
+BALL_TRIGGER_CHAR_UUID = "12340000-0000-4b59-9000-000000000003"
 BLE_NOTIFY_RETRY_COUNT = 3
 BLE_NOTIFY_RETRY_DELAY_S = 0.2
 BLE_NOTIFY_INITIAL_DELAY_S = 0.15
@@ -83,6 +84,8 @@ _ble_available = False
 _ble_loop = None
 _ble_server = None
 _ble_ready = threading.Event()
+_capture_lock = threading.Lock()
+_capture_active = False
 
 try:
     from bless import (
@@ -1270,10 +1273,49 @@ def ble_thread_main():
     _ble_loop.run_forever()
 
 
+def _launch_capture_worker(trigger_label):
+    global _capture_active
+    with _capture_lock:
+        if _capture_active:
+            print("BLE trigger ignored - capture already running ({})".format(trigger_label))
+            return
+        _capture_active = True
+
+    def worker():
+        global _capture_active
+        try:
+            print("BLE trigger received: {}".format(trigger_label))
+            run_capture_once(calibrate=False)
+        except Exception as exc:
+            print("BLE-triggered capture failed: {}".format(exc))
+        finally:
+            with _capture_lock:
+                _capture_active = False
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def handle_ble_write(characteristic, value, **kwargs):
+    char_uuid = str(getattr(characteristic, "uuid", "")).lower()
+    payload = bytes(value or b"")
+    text = payload.decode("utf-8", errors="ignore").strip()
+    print(
+        "BLE write: {} -> {}".format(
+            char_uuid or "(unknown characteristic)",
+            text or payload,
+        ),
+    )
+    if char_uuid != BALL_TRIGGER_CHAR_UUID.lower():
+        return
+    if text.startswith("FWD"):
+        _launch_capture_worker(text)
+
+
 async def ble_setup():
     global _ble_server
     _ble_server = BlessServer(name=BLE_DEVICE_NAME, loop=_ble_loop)
     _ble_server.read_request_func = lambda char, **kwargs: char.value
+    _ble_server.write_request_func = handle_ble_write
 
     await _ble_server.add_new_service(BALL_DATA_SERVICE_UUID)
     await _ble_server.add_new_characteristic(
@@ -1282,6 +1324,14 @@ async def ble_setup():
         GATTCharacteristicProperties.read | GATTCharacteristicProperties.notify,
         None,
         GATTAttributePermissions.readable,
+    )
+    await _ble_server.add_new_characteristic(
+        BALL_DATA_SERVICE_UUID,
+        BALL_TRIGGER_CHAR_UUID,
+        GATTCharacteristicProperties.write
+        | GATTCharacteristicProperties.write_without_response,
+        None,
+        GATTAttributePermissions.writeable,
     )
     await _ble_server.start()
     print("BLE: advertising as '{}'".format(BLE_DEVICE_NAME))

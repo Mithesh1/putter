@@ -1051,6 +1051,25 @@ static void sendLatencyPingOverBle(uint32_t pingId) {
   notifyCharacteristic->notify();
 }
 
+static void sendForwardTriggerOverBle(uint32_t triggerMs) {
+  if (!bleClientConnected || notifyCharacteristic == nullptr) {
+    return;
+  }
+
+  const int len = snprintf((char *)rawPacketBuffer,
+                           sizeof(rawPacketBuffer),
+                           "EVENT:FWD:%lu",
+                           (unsigned long)triggerMs);
+  if (len <= 0) {
+    return;
+  }
+
+  const size_t payloadLength =
+      min((size_t)len, sizeof(rawPacketBuffer) - 1U);
+  notifyCharacteristic->setValue(rawPacketBuffer, payloadLength);
+  notifyCharacteristic->notify();
+}
+
 static void transitionToState(PuttState nextState) {
   if (putt.state == nextState) {
     return;
@@ -1329,6 +1348,7 @@ static void updatePuttStateMachine() {
       if (putt.forward_confirm_frames >= MOTION_CONFIRM_FRAMES) {
         putt.full_forward_seen = true;
         putt.forward_stroke_start_ms = now_ms;
+        sendForwardTriggerOverBle(now_ms);
         transitionToState(PUTT_FORWARD_STROKE);
       }
       break;

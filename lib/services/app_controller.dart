@@ -1,11 +1,12 @@
 import 'dart:async';
-import 'dart:math';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:designcode/ble_contract.dart';
 import 'package:designcode/models/stroke_packet.dart';
 import 'package:designcode/packet_codec.dart';
+import 'package:designcode/services/ball_data_service.dart';
 import 'package:designcode/services/ble_transport.dart';
 import 'package:designcode/services/mock_ble_service.dart';
 import 'package:designcode/services/parser.dart';
@@ -81,7 +82,7 @@ class AppController {
   BleConnectionState get connectionState => _transport.connectionState;
   String _livePuttState = 'Idle';
   String _bleLatencyLabel = 'BLE latency unavailable';
-  String _impactToBleLatencyLabel = 'Impact -> BLE unavailable';
+  String _impactToBleLatencyLabel = 'End of stroke -> BLE unavailable';
 
   String get livePuttState => _livePuttState;
   String get bleLatencyLabel => _bleLatencyLabel;
@@ -223,7 +224,7 @@ class AppController {
         _missedLatencyPings = 0;
         _bleLatencyLabel = 'BLE latency unavailable';
         _bleLatencyController.add(_bleLatencyLabel);
-        _impactToBleLatencyLabel = 'Impact -> BLE unavailable';
+        _impactToBleLatencyLabel = 'End of stroke -> BLE unavailable';
         _impactToBleLatencyController.add(_impactToBleLatencyLabel);
       }
     });
@@ -255,6 +256,17 @@ class AppController {
         return;
       }
 
+      final forwardTriggerMs = _decodeForwardTrigger(bytes);
+      if (forwardTriggerMs != null) {
+        final message = 'Forward trigger event at ${forwardTriggerMs}ms';
+        _diagnosticController.add(message);
+        print(message);
+        unawaited(
+          BallDataService.instance.sendForwardTrigger(forwardTriggerMs),
+        );
+        return;
+      }
+
       final fragment = _codec.decodeFragment(bytes);
       final reassembled = _reassembler.addFragment(fragment);
 
@@ -279,7 +291,7 @@ class AppController {
         expectedStrokeId: reassembled.strokeId,
       );
       _impactToBleLatencyLabel =
-          'Impact -> BLE ${packet.impactToBleTxMs.toStringAsFixed(1)}ms';
+          'End of stroke -> BLE ${packet.impactToBleTxMs.toStringAsFixed(1)}ms';
       _impactToBleLatencyController.add(_impactToBleLatencyLabel);
 
       final session = _activeSession ?? await _repository.getActiveSession();
@@ -416,6 +428,14 @@ class AppController {
       return null;
     }
     return int.tryParse(ascii.substring('PING:'.length).trim());
+  }
+
+  int? _decodeForwardTrigger(Uint8List bytes) {
+    final ascii = utf8.decode(bytes, allowMalformed: true).trim();
+    if (!ascii.startsWith('EVENT:FWD:')) {
+      return null;
+    }
+    return int.tryParse(ascii.substring('EVENT:FWD:'.length).trim());
   }
 }
 

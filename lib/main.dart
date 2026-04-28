@@ -331,17 +331,19 @@ class DashboardPage extends StatelessWidget {
                                                       title: 'Session Summary',
                                                     ),
                                                     const SizedBox(height: 12),
-                                                    SummaryCard(
-                                                      activeSession: activeSession,
-                                                      latestStroke: latestStroke,
-                                                    ),
-                                                    const SizedBox(height: 24),
-                                                    const SectionTitle(
-                                                      title: 'Coach Notes',
-                                                    ),
-                                                    const SizedBox(height: 12),
-                                                    CoachNotesCard(
-                                                      latestStroke: latestStroke,
+                                                    StreamBuilder<SessionDetail?>(
+                                                      stream: activeSession?.localId ==
+                                                              null
+                                                          ? const Stream<SessionDetail?>.empty()
+                                                          : controller.watchSessionDetail(
+                                                              activeSession!.localId!,
+                                                            ),
+                                                      builder: (context, detailSnapshot) {
+                                                        return SummaryCard(
+                                                          activeSession: activeSession,
+                                                          detail: detailSnapshot.data,
+                                                        );
+                                                      },
                                                     ),
                                                   ],
                                                 ),
@@ -411,18 +413,6 @@ class _SessionPageState extends State<SessionPage> {
             final strokes =
                 detail?.strokes.reversed.toList(growable: false) ??
                 const <StoredStroke>[];
-            final centerHits = strokes
-                .where((stroke) => stroke.metrics.impact == 'Center')
-                .length;
-            final centerHitRate = strokes.isEmpty
-                ? 0.0
-                : (centerHits / strokes.length) * 100;
-            final averageTempo = strokes.isEmpty
-                ? 0.0
-                : strokes
-                          .map((stroke) => stroke.metrics.tempoRatio)
-                          .reduce((a, b) => a + b) /
-                      strokes.length;
             final selectedStroke = strokes.cast<StoredStroke?>().firstWhere(
                   (stroke) =>
                       (stroke?.localId ?? stroke?.packetId) == _selectedStrokeId,
@@ -452,69 +442,27 @@ class _SessionPageState extends State<SessionPage> {
                       ),
                     ),
                     const SizedBox(height: 18),
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(22),
-                        boxShadow: const [
-                          BoxShadow(
-                            color: Color(0x12000000),
-                            blurRadius: 14,
-                            offset: Offset(0, 6),
-                          ),
-                        ],
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceAround,
-                        children: [
-                          MiniStat(title: 'Putts', value: '${strokes.length}'),
-                          MiniStat(
-                            title: 'Center Hits',
-                            value: '${centerHitRate.toStringAsFixed(0)}%',
-                          ),
-                          MiniStat(
-                            title: 'Avg Tempo',
-                            value: averageTempo == 0
-                                ? '--'
-                                : averageTempo.toStringAsFixed(2),
-                          ),
-                        ],
-                      ),
+                    SummaryCard(
+                      activeSession: activeSession,
+                      detail: detail,
                     ),
                     const SizedBox(height: 18),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: FilledButton.icon(
-                            onPressed: () async {
-                              if (activeSession == null) {
-                                await widget.controller.startSession();
-                              } else {
-                                await widget.controller.endSession();
-                              }
-                            },
-                            icon: Icon(
-                              activeSession == null
-                                  ? Icons.play_arrow
-                                  : Icons.stop,
-                            ),
-                            label: Text(
-                              activeSession == null
-                                  ? 'Start Session'
-                                  : 'End Session',
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: () => widget.controller.reconnect(),
-                            icon: const Icon(Icons.bluetooth_searching),
-                            label: const Text('Reconnect'),
-                          ),
-                        ),
-                      ],
+                    FilledButton.icon(
+                      onPressed: () async {
+                        if (activeSession == null) {
+                          await widget.controller.startSession();
+                        } else {
+                          await widget.controller.endSession();
+                        }
+                      },
+                      icon: Icon(
+                        activeSession == null ? Icons.play_arrow : Icons.stop,
+                      ),
+                      label: Text(
+                        activeSession == null
+                            ? 'Start Session'
+                            : 'End Session',
+                      ),
                     ),
                     if (hasSelection) ...[
                       const SizedBox(height: 18),
@@ -1375,8 +1323,16 @@ String _formatMiniChartValue(String unitLabel, double value) {
   return value.toStringAsFixed(1);
 }
 
+String _formatMiniChartMs(double ms) {
+  final rounded = ms.roundToDouble();
+  if ((ms - rounded).abs() < 0.05) {
+    return '${rounded.toInt()}ms';
+  }
+  return '${ms.toStringAsFixed(1)}ms';
+}
+
 String _buildSelectionTooltip(MiniChartData data, _MiniChartSelection selection) {
-  final buffer = StringBuffer('${selection.ms.round()}ms');
+  final buffer = StringBuffer(_formatMiniChartMs(selection.ms));
   for (var index = 0; index < selection.points.length; index++) {
     final point = selection.points[index];
     final series = data.series[index];
@@ -1597,17 +1553,32 @@ class SummaryCard extends StatelessWidget {
   const SummaryCard({
     super.key,
     required this.activeSession,
-    required this.latestStroke,
+    required this.detail,
   });
 
   final PracticeSession? activeSession;
-  final StoredStroke? latestStroke;
+  final SessionDetail? detail;
 
   @override
   Widget build(BuildContext context) {
+    final strokes =
+        detail?.strokes.reversed.toList(growable: false) ?? const <StoredStroke>[];
+    final centerHits = strokes
+        .where((stroke) => stroke.metrics.impact == 'Center')
+        .length;
+    final centerHitRate = strokes.isEmpty
+        ? 0.0
+        : (centerHits / strokes.length) * 100;
+    final averageTempo = strokes.isEmpty
+        ? 0.0
+        : strokes
+                  .map((stroke) => stroke.metrics.tempoRatio)
+                  .reduce((a, b) => a + b) /
+              strokes.length;
+
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(22),
@@ -1619,71 +1590,20 @@ class SummaryCard extends StatelessWidget {
           ),
         ],
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
-          Text(
-            activeSession == null
-                ? 'No active session'
-                : 'Session ${activeSession!.wireSessionId}',
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+          MiniStat(title: 'Putts', value: '${strokes.length}'),
+          MiniStat(
+            title: 'Center Hits',
+            value: '${centerHitRate.toStringAsFixed(0)}%',
           ),
-          const SizedBox(height: 12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: SummaryPill(
-                  label: 'Putts',
-                  value: '${activeSession?.strokeCount ?? 0}',
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: SummaryPill(
-                  label: 'Avg Face',
-                  value: latestStroke == null
-                      ? '--'
-                      : '${latestStroke!.metrics.faceAngleDeg.abs().toStringAsFixed(1)}°',
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: SummaryPill(
-                  label: 'Impact',
-                  value: latestStroke?.metrics.impact ?? '--',
-                ),
-              ),
-            ],
+          MiniStat(
+            title: 'Avg Tempo',
+            value: averageTempo == 0
+                ? '--'
+                : '${averageTempo.toStringAsFixed(2)}:1',
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class SummaryPill extends StatelessWidget {
-  const SummaryPill({super.key, required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 14),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF1F5F3),
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Column(
-        children: [
-          Text(
-            value,
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 4),
-          Text(label, style: const TextStyle(fontSize: 12)),
         ],
       ),
     );
@@ -2631,7 +2551,8 @@ List<MetricCardData> _buildStrokeMetricCards(
     MetricCardData(
       title: 'Stroke Speed',
       value: stroke == null ? 'No data' : stroke.metrics.speedLabel,
-      subtitle: 'Impact speed along main putt axis',
+      subtitle:
+          'From gravity-compensated accel projected onto main putt axis',
       icon: Icons.sports_score,
       chart: latestPuttSeries == null
           ? null
@@ -2714,8 +2635,8 @@ List<MetricCardData> _buildStrokeMetricCards(
               impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
               color: const Color(0xFF2E7D32),
               label: 'Gyro Y',
-              minY: -60,
-              maxY: 60,
+              minY: -80,
+              maxY: 80,
               unitLabel: 'dps',
               markers: _gyroPhaseMarkers(latestPuttSeries),
             ),
@@ -2739,8 +2660,8 @@ List<MetricCardData> _buildStrokeMetricCards(
               impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
               color: const Color(0xFF8E24AA),
               label: 'Gyro Z',
-              minY: -60,
-              maxY: 60,
+              minY: -80,
+              maxY: 80,
               unitLabel: 'dps',
               markers: _gyroPhaseMarkers(latestPuttSeries),
             ),
@@ -2831,8 +2752,8 @@ List<MetricCardData> _buildStrokeMetricCards(
               impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
               color: const Color(0xFF3949AB),
               label: 'Accel X',
-              minY: -10,
-              maxY: 10,
+              minY: -30,
+              maxY: 30,
               unitLabel: 'm/s²',
             ),
     ),
@@ -2853,8 +2774,8 @@ List<MetricCardData> _buildStrokeMetricCards(
               impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
               color: const Color(0xFF00838F),
               label: 'Accel Y',
-              minY: -10,
-              maxY: 10,
+              minY: -30,
+              maxY: 30,
               unitLabel: 'm/s²',
             ),
     ),
@@ -2875,8 +2796,8 @@ List<MetricCardData> _buildStrokeMetricCards(
               impactOffsetMs: latestPuttSeries.imuImpactOffsetMs,
               color: const Color(0xFFE53935),
               label: 'Accel Z',
-              minY: -10,
-              maxY: 10,
+              minY: -30,
+              maxY: 30,
               unitLabel: 'm/s²',
             ),
     ),

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
@@ -115,6 +116,8 @@ class BallDataService {
   static const String _targetDeviceName = 'BurstAnalyzer';
   static const String _serviceUuid = '12340000-0000-4b59-9000-000000000001';
   static const String _charUuid = '12340000-0000-4b59-9000-000000000002';
+  static const String _triggerCharUuid =
+      '12340000-0000-4b59-9000-000000000003';
   static const String _timeseriesCharUuid =
       '12340000-0000-4b59-9000-000000000004';
 
@@ -135,6 +138,7 @@ class BallDataService {
   BallTimeSeries? _latestTimeSeries;
   final List<BallData> _history = <BallData>[];
   final Set<String> _seenScanIds = <String>{};
+  String? _connectedDeviceId;
   static const int _maxHistoryPackets = 24;
 
   Stream<BallData> get stream => _controller.stream;
@@ -200,6 +204,7 @@ class BallDataService {
 
   Future<void> _cancelTransientWork() async {
     _seenScanIds.clear();
+    _connectedDeviceId = null;
     await _scanSub?.cancel();
     _scanSub = null;
     await _connSub?.cancel();
@@ -281,10 +286,12 @@ class BallDataService {
     _connSub?.cancel();
     _connSub = _ble.connectToDevice(id: deviceId).listen((update) {
       if (update.connectionState == DeviceConnectionState.connected) {
+        _connectedDeviceId = deviceId;
         _emitDebug('Ball device connected');
         _subscribe(deviceId);
         _subscribeTimeseries(deviceId);
       } else if (update.connectionState == DeviceConnectionState.disconnected) {
+        _connectedDeviceId = null;
         _emitDebug('Ball device disconnected');
         _notifySub?.cancel();
         _notifySub = null;
@@ -362,6 +369,30 @@ class BallDataService {
         _emitDebug('Ball time-series stream error');
       },
     );
+  }
+
+  Future<void> sendForwardTrigger(int forwardTriggerMs) async {
+    final deviceId = _connectedDeviceId;
+    if (deviceId == null) {
+      _emitDebug('Skipped ball trigger write; ball device not connected');
+      return;
+    }
+
+    final characteristic = QualifiedCharacteristic(
+      serviceId: Uuid.parse(_serviceUuid),
+      characteristicId: Uuid.parse(_triggerCharUuid),
+      deviceId: deviceId,
+    );
+    final payload = utf8.encode('FWD:$forwardTriggerMs');
+    try {
+      await _ble.writeCharacteristicWithResponse(
+        characteristic,
+        value: payload,
+      );
+      _emitDebug('Forward trigger sent to ball device: ${payload.length}B');
+    } catch (error) {
+      _emitDebug('Ball trigger write failed: $error');
+    }
   }
 
   Future<void> dispose() async {

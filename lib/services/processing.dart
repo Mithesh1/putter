@@ -14,6 +14,10 @@ const double _piezoImpactAbsoluteThreshold = 300.0;
 const double _piezoContactAverageDelta = 45.0;
 const double _piezoContactRelativeDeltaThreshold = 0.20;
 const double _piezoContactMinStrength = 35.0;
+const double _piezoContactSinglePeakDelta = 120.0;
+const double _piezoContactSinglePeakLowSideMax = 180.0;
+const double _piezoContactPeakDelta = 120.0;
+const double _piezoContactPeakRelativeDeltaThreshold = 0.45;
 const int _piezoContactWindowRadius = 3;
 const int _motionConfirmFrames = 3;
 const int _followThroughConfirmFrames = 2;
@@ -214,7 +218,7 @@ StrokeMetrics processStrokePacket(
           offsetMs + _idxToMs(segmentation.followThroughEndIdx, imuHz),
     ),
     qualityFlags: StrokeQualityFlags(
-      weakImpact: !accelImpact.found || piezo.weakImpact,
+      weakImpact: piezo.weakImpact,
       poorSegmentation: segmentation.poorSegmentation || tempo.poorSegmentation,
       quaternionMissing: !imuData.hasQuaternionData,
     ),
@@ -315,9 +319,36 @@ _PiezoResult _processPiezo(
   final searchEnd = min(maxLength - 1, expectedIdx + searchRadius);
   var bestImpactIdx = expectedIdx;
   var bestImpactStrength = -1.0;
-  var bestToeDelta = 0.0;
-  var bestHeelDelta = 0.0;
   var bestAbsolutePeak = double.negativeInfinity;
+  var bestToeRawAtImpact = 0.0;
+  var bestHeelRawAtImpact = 0.0;
+  var globalBestImpactIdx = expectedIdx;
+  var globalBestAbsolutePeak = double.negativeInfinity;
+  var globalBestToeRaw = 0.0;
+  var globalBestHeelRaw = 0.0;
+  var globalBestImpactStrength = -1.0;
+
+  for (var idx = 0; idx < maxLength; idx++) {
+    final toeRaw = idx < toePiezo.length ? toePiezo[idx].toDouble() : 0.0;
+    final heelRaw = idx < heelPiezo.length ? heelPiezo[idx].toDouble() : 0.0;
+    final toeDelta = idx < toePiezo.length
+        ? max(0.0, toeRaw - toeAverage)
+        : 0.0;
+    final heelDelta = idx < heelPiezo.length
+        ? max(0.0, heelRaw - heelAverage)
+        : 0.0;
+    final absolutePeak = max(toeRaw, heelRaw);
+    final combinedStrength = max(toeDelta, heelDelta);
+    if (absolutePeak > globalBestAbsolutePeak ||
+        (absolutePeak == globalBestAbsolutePeak &&
+            combinedStrength > globalBestImpactStrength)) {
+      globalBestImpactIdx = idx;
+      globalBestAbsolutePeak = absolutePeak;
+      globalBestToeRaw = toeRaw;
+      globalBestHeelRaw = heelRaw;
+      globalBestImpactStrength = combinedStrength;
+    }
+  }
 
   for (var idx = searchStart; idx <= searchEnd; idx++) {
     final toeRaw = idx < toePiezo.length ? toePiezo[idx].toDouble() : 0.0;
@@ -334,8 +365,8 @@ _PiezoResult _processPiezo(
       bestAbsolutePeak = absolutePeak;
       bestImpactStrength = max(toeDelta, heelDelta);
       bestImpactIdx = idx;
-      bestToeDelta = toeDelta;
-      bestHeelDelta = heelDelta;
+      bestToeRawAtImpact = toeRaw;
+      bestHeelRawAtImpact = heelRaw;
       continue;
     }
     if (bestAbsolutePeak >= _piezoImpactAbsoluteThreshold) {
@@ -345,9 +376,21 @@ _PiezoResult _processPiezo(
     if (combinedStrength > bestImpactStrength) {
       bestImpactStrength = combinedStrength;
       bestImpactIdx = idx;
-      bestToeDelta = toeDelta;
-      bestHeelDelta = heelDelta;
+      bestToeRawAtImpact = toeRaw;
+      bestHeelRawAtImpact = heelRaw;
     }
+  }
+
+  final globalPeakDominatesLocal =
+      globalBestAbsolutePeak >= _piezoImpactAbsoluteThreshold &&
+      (bestAbsolutePeak < _piezoImpactAbsoluteThreshold ||
+          globalBestAbsolutePeak > bestAbsolutePeak + 150.0);
+  if (globalPeakDominatesLocal) {
+    bestImpactIdx = globalBestImpactIdx;
+    bestAbsolutePeak = globalBestAbsolutePeak;
+    bestToeRawAtImpact = globalBestToeRaw;
+    bestHeelRawAtImpact = globalBestHeelRaw;
+    bestImpactStrength = globalBestImpactStrength;
   }
 
   final impactStrength = bestImpactStrength < 0.0 ? 0.0 : bestImpactStrength;
@@ -359,12 +402,16 @@ _PiezoResult _processPiezo(
   var toeWindowTotal = 0.0;
   var heelWindowTotal = 0.0;
   var windowSamples = 0;
+  var toeWindowPeakRaw = 0.0;
+  var heelWindowPeakRaw = 0.0;
 
   for (var idx = windowStart; idx <= windowEnd; idx++) {
     final toeRaw = idx < toePiezo.length ? toePiezo[idx].toDouble() : 0.0;
     final heelRaw = idx < heelPiezo.length ? heelPiezo[idx].toDouble() : 0.0;
     toeWindowTotal += toeRaw;
     heelWindowTotal += heelRaw;
+    toeWindowPeakRaw = max(toeWindowPeakRaw, toeRaw);
+    heelWindowPeakRaw = max(heelWindowPeakRaw, heelRaw);
     windowSamples++;
   }
 
@@ -372,23 +419,93 @@ _PiezoResult _processPiezo(
       windowSamples == 0 ? 0.0 : toeWindowTotal / windowSamples;
   final heelWindowAverage =
       windowSamples == 0 ? 0.0 : heelWindowTotal / windowSamples;
+  final windowPeakDifference = (toeWindowPeakRaw - heelWindowPeakRaw).abs();
+  final windowPeakRelativeDifference =
+      windowPeakDifference / (toeWindowPeakRaw + heelWindowPeakRaw + 1e-6);
   final averageDifference = (toeWindowAverage - heelWindowAverage).abs();
   final relativeDifference =
       averageDifference / (toeWindowAverage + heelWindowAverage + 1e-6);
+  final peakDifference = (bestToeRawAtImpact - bestHeelRawAtImpact).abs();
+  final peakRelativeDifference =
+      peakDifference / (bestToeRawAtImpact + bestHeelRawAtImpact + 1e-6);
+  final toeWindowPeakAbsolute =
+      toeWindowPeakRaw >= _piezoImpactAbsoluteThreshold;
+  final heelWindowPeakAbsolute =
+      heelWindowPeakRaw >= _piezoImpactAbsoluteThreshold;
+  final bothWindowPeaksAbsolute =
+      toeWindowPeakAbsolute && heelWindowPeakAbsolute;
+  final clearSingleWindowPeakDominance =
+      (toeWindowPeakAbsolute &&
+              heelWindowPeakRaw <= _piezoContactSinglePeakLowSideMax &&
+              (toeWindowPeakRaw - heelWindowPeakRaw) >=
+                  _piezoContactSinglePeakDelta) ||
+          (heelWindowPeakAbsolute &&
+              toeWindowPeakRaw <= _piezoContactSinglePeakLowSideMax &&
+              (heelWindowPeakRaw - toeWindowPeakRaw) >=
+                  _piezoContactSinglePeakDelta);
+  final toePeakAbsolute = bestToeRawAtImpact >= _piezoImpactAbsoluteThreshold;
+  final heelPeakAbsolute = bestHeelRawAtImpact >= _piezoImpactAbsoluteThreshold;
+  final bothPeaksAbsolute =
+      toePeakAbsolute && heelPeakAbsolute;
+  final clearSinglePeakDominance =
+      (toePeakAbsolute &&
+              bestHeelRawAtImpact <= _piezoContactSinglePeakLowSideMax &&
+              (bestToeRawAtImpact - bestHeelRawAtImpact) >=
+                  _piezoContactSinglePeakDelta) ||
+          (heelPeakAbsolute &&
+              bestToeRawAtImpact <= _piezoContactSinglePeakLowSideMax &&
+              (bestHeelRawAtImpact - bestToeRawAtImpact) >=
+                  _piezoContactSinglePeakDelta);
   final clearSideSignal =
       bestAbsolutePeak >= _piezoImpactAbsoluteThreshold ||
       impactStrength >= _piezoContactMinStrength;
+  final clearPeakDominance =
+      bestAbsolutePeak >= _piezoImpactAbsoluteThreshold &&
+      peakDifference >= _piezoContactPeakDelta &&
+      peakRelativeDifference >= _piezoContactPeakRelativeDeltaThreshold;
 
   String impactLabel;
-  if (!impactFound) {
+  final confidentPiezoImpact = bestAbsolutePeak >= _piezoImpactAbsoluteThreshold ||
+      impactStrength >= _piezoContactMinStrength;
+
+  if (!impactFound && !confidentPiezoImpact) {
     impactLabel = 'Unknown';
   } else if (weakImpact || !clearSideSignal) {
     impactLabel = 'Center';
+  } else if (clearSingleWindowPeakDominance) {
+    impactLabel = toeWindowPeakRaw > heelWindowPeakRaw ? 'Toe' : 'Heel';
+  } else if (bothWindowPeaksAbsolute && windowPeakDifference > 0.0) {
+    impactLabel = toeWindowPeakRaw > heelWindowPeakRaw ? 'Toe' : 'Heel';
+  } else if (clearSinglePeakDominance) {
+    impactLabel = bestToeRawAtImpact > bestHeelRawAtImpact ? 'Toe' : 'Heel';
+  } else if (bothPeaksAbsolute && peakDifference > 0.0) {
+    impactLabel = bestToeRawAtImpact > bestHeelRawAtImpact ? 'Toe' : 'Heel';
+  } else if (clearPeakDominance) {
+    impactLabel = bestToeRawAtImpact > bestHeelRawAtImpact ? 'Toe' : 'Heel';
   } else if (averageDifference < _piezoContactAverageDelta ||
       relativeDifference < _piezoContactRelativeDeltaThreshold) {
     impactLabel = 'Center';
   } else {
     impactLabel = toeWindowAverage > heelWindowAverage ? 'Toe' : 'Heel';
+  }
+
+  if ((impactFound || confidentPiezoImpact) &&
+      impactLabel == 'Center' &&
+      bestAbsolutePeak >= _piezoImpactAbsoluteThreshold) {
+    print(
+      'Piezo center fallback: idx=$bestImpactIdx '
+      'toeRaw=${bestToeRawAtImpact.toStringAsFixed(0)} '
+      'heelRaw=${bestHeelRawAtImpact.toStringAsFixed(0)} '
+      'globalIdx=$globalBestImpactIdx '
+      'globalPeak=${globalBestAbsolutePeak.toStringAsFixed(0)} '
+      'toePeak=${toeWindowPeakRaw.toStringAsFixed(0)} '
+      'heelPeak=${heelWindowPeakRaw.toStringAsFixed(0)} '
+      'toeAvg=${toeWindowAverage.toStringAsFixed(1)} '
+      'heelAvg=${heelWindowAverage.toStringAsFixed(1)} '
+      'windowPeakRel=${windowPeakRelativeDifference.toStringAsFixed(2)} '
+      'peakRel=${peakRelativeDifference.toStringAsFixed(2)} '
+      'avgRel=${relativeDifference.toStringAsFixed(2)}',
+    );
   }
 
   return _PiezoResult(
