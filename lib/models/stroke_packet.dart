@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 enum PracticeSessionStatus { active, ended }
@@ -304,6 +305,88 @@ class StrokeMetrics {
   }
 }
 
+class BallStrokeAnalysis {
+  final double pathDriftDeg;
+  final double rmsLateralPx;
+  final double directionWobbleDeg;
+  final double totalPathPx;
+  final double avgRadiusPx;
+  final int trackingQualityPct;
+  final int frameCount;
+  final double fps;
+  final int linkedAtMs;
+
+  const BallStrokeAnalysis({
+    required this.pathDriftDeg,
+    required this.rmsLateralPx,
+    required this.directionWobbleDeg,
+    required this.totalPathPx,
+    required this.avgRadiusPx,
+    required this.trackingQualityPct,
+    required this.frameCount,
+    required this.fps,
+    required this.linkedAtMs,
+  });
+
+  double get rmsLateralBallDiams =>
+      avgRadiusPx > 0 ? rmsLateralPx / (avgRadiusPx * 2) : 0.0;
+
+  double get totalPathBallDiams =>
+      avgRadiusPx > 0 ? totalPathPx / (avgRadiusPx * 2) : 0.0;
+
+  String get driftDirection => pathDriftDeg > 0.2
+      ? 'Right'
+      : pathDriftDeg < -0.2
+      ? 'Left'
+      : 'Straight';
+
+  Map<String, dynamic> toJson() {
+    return {
+      'kind': 'ball_path_analysis_v1',
+      'pathDriftDeg': pathDriftDeg,
+      'rmsLateralPx': rmsLateralPx,
+      'directionWobbleDeg': directionWobbleDeg,
+      'totalPathPx': totalPathPx,
+      'avgRadiusPx': avgRadiusPx,
+      'trackingQualityPct': trackingQualityPct,
+      'frameCount': frameCount,
+      'fps': fps,
+      'linkedAtMs': linkedAtMs,
+    };
+  }
+
+  String toJsonString() => jsonEncode(toJson());
+
+  static BallStrokeAnalysis? tryParse(String? raw) {
+    if (raw == null || raw.isEmpty) {
+      return null;
+    }
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) {
+        return null;
+      }
+      if (decoded['kind'] != 'ball_path_analysis_v1') {
+        return null;
+      }
+      return BallStrokeAnalysis(
+        pathDriftDeg: (decoded['pathDriftDeg'] as num?)?.toDouble() ?? 0.0,
+        rmsLateralPx: (decoded['rmsLateralPx'] as num?)?.toDouble() ?? 0.0,
+        directionWobbleDeg:
+            (decoded['directionWobbleDeg'] as num?)?.toDouble() ?? 0.0,
+        totalPathPx: (decoded['totalPathPx'] as num?)?.toDouble() ?? 0.0,
+        avgRadiusPx: (decoded['avgRadiusPx'] as num?)?.toDouble() ?? 0.0,
+        trackingQualityPct: (decoded['trackingQualityPct'] as num?)?.toInt() ?? 0,
+        frameCount: (decoded['frameCount'] as num?)?.toInt() ?? 0,
+        fps: (decoded['fps'] as num?)?.toDouble() ?? 0.0,
+        linkedAtMs: (decoded['linkedAtMs'] as num?)?.toInt() ?? 0,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
 class StrokeLatencyTimestamps {
   final int receivedAtMs;
   final int parsedAtMs;
@@ -348,6 +431,7 @@ class StoredStroke {
   final int syncAttempts;
   final String? lastSyncError;
   final StrokeLatencyTimestamps latency;
+  final BallStrokeAnalysis? ballAnalysis;
 
   const StoredStroke({
     required this.localId,
@@ -361,6 +445,7 @@ class StoredStroke {
     required this.syncAttempts,
     required this.lastSyncError,
     required this.latency,
+    required this.ballAnalysis,
   });
 
   String get dedupeKey => '$wireSessionId:$packetId';
@@ -377,6 +462,7 @@ class StoredStroke {
     int? syncAttempts,
     String? lastSyncError,
     StrokeLatencyTimestamps? latency,
+    BallStrokeAnalysis? ballAnalysis,
   }) {
     return StoredStroke(
       localId: localId ?? this.localId,
@@ -390,6 +476,7 @@ class StoredStroke {
       syncAttempts: syncAttempts ?? this.syncAttempts,
       lastSyncError: lastSyncError ?? this.lastSyncError,
       latency: latency ?? this.latency,
+      ballAnalysis: ballAnalysis ?? this.ballAnalysis,
     );
   }
 }

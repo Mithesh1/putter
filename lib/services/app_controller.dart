@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
@@ -17,6 +18,14 @@ import 'package:designcode/services/sync_service.dart';
 
 enum TransportMode { mock, real }
 
+class _PendingBallLink {
+  _PendingBallLink({required this.forwardTriggerMs});
+
+  final int forwardTriggerMs;
+  int? localStrokeId;
+  BallStrokeAnalysis? ballAnalysis;
+}
+
 class AppController {
   AppController({
     required SessionRepository repository,
@@ -26,6 +35,8 @@ class AppController {
     PacketCodec? codec,
     PacketParser? parser,
     PacketReassembler? reassembler,
+    Stream<BallData>? ballDataStream,
+    Future<void> Function(int forwardTriggerMs)? forwardTriggerSender,
     TransportMode initialTransportMode = TransportMode.mock,
   }) : _repository = repository,
        _syncService = syncService,
@@ -34,6 +45,8 @@ class AppController {
        _codec = codec ?? const PacketCodec(),
        _parser = parser ?? PacketParser(codec: codec ?? const PacketCodec()),
        _reassembler = reassembler ?? PacketReassembler(),
+       _ballDataStream = ballDataStream,
+       _forwardTriggerSender = forwardTriggerSender,
        _transportMode = initialTransportMode;
 
   final SessionRepository _repository;
@@ -43,6 +56,8 @@ class AppController {
   final PacketCodec _codec;
   final PacketParser _parser;
   final PacketReassembler _reassembler;
+  final Stream<BallData>? _ballDataStream;
+  final Future<void> Function(int forwardTriggerMs)? _forwardTriggerSender;
 
   final StreamController<BleConnectionState> _connectionStateController =
       StreamController<BleConnectionState>.broadcast();
@@ -61,6 +76,7 @@ class AppController {
   StreamSubscription<BleConnectionState>? _transportStateSubscription;
   StreamSubscription<PracticeSession?>? _activeSessionSubscription;
   StreamSubscription<String>? _syncStatusSubscription;
+  StreamSubscription<BallData>? _ballDataSubscription;
   Timer? _latencyPingTimer;
 
   PracticeSession? _activeSession;
@@ -69,6 +85,7 @@ class AppController {
   final Map<int, int> _pendingLatencyPings = <int, int>{};
   int _nextLatencyPingId = 1;
   int _missedLatencyPings = 0;
+  final Queue<_PendingBallLink> _pendingBallLinks = Queue<_PendingBallLink>();
 
   BleTransport get _transport => switch (_transportMode) {
     TransportMode.mock => _mockTransport,
@@ -114,6 +131,32 @@ class AppController {
     _syncStatusSubscription = _syncService.statusStream.listen(
       _syncStatusController.add,
     );
+    final ballDataStream = _ballDataStream ?? BallDataService.instance.stream;
+    _ballDataSubscription = ballDataStream.listen((ballData) {
+      final analysis = BallStrokeAnalysis(
+        pathDriftDeg: ballData.pathDriftDeg,
+        rmsLateralPx: ballData.rmsLateralPx,
+        directionWobbleDeg: ballData.directionWobbleDeg,
+        totalPathPx: ballData.totalPathPx,
+        avgRadiusPx: ballData.avgRadiusPx,
+        trackingQualityPct: ballData.trackingQualityPct,
+        frameCount: ballData.frameCount,
+        fps: ballData.fps,
+        linkedAtMs: ballData.receivedAt.millisecondsSinceEpoch,
+      );
+      final pendingLink = _pendingBallLinks.cast<_PendingBallLink?>().firstWhere(
+        (link) => link?.ballAnalysis == null,
+        orElse: () => null,
+      );
+      if (pendingLink == null) {
+        _diagnosticController.add(
+          'Ball analysis arrived without a pending trigger token.',
+        );
+        return;
+      }
+      pendingLink.ballAnalysis = analysis;
+      unawaited(_flushPendingBallLinks());
+    });
   }
 
   Stream<BleConnectionState> watchConnectionState() =>
@@ -261,9 +304,12 @@ class AppController {
         final message = 'Forward trigger event at ${forwardTriggerMs}ms';
         _diagnosticController.add(message);
         print(message);
-        unawaited(
-          BallDataService.instance.sendForwardTrigger(forwardTriggerMs),
+        _pendingBallLinks.addLast(
+          _PendingBallLink(forwardTriggerMs: forwardTriggerMs),
         );
+        final forwardTriggerSender =
+            _forwardTriggerSender ?? BallDataService.instance.sendForwardTrigger;
+        unawaited(forwardTriggerSender(forwardTriggerMs));
         return;
       }
 
@@ -317,6 +363,18 @@ class AppController {
           storedStroke!.localId!,
           DateTime.now().millisecondsSinceEpoch,
         );
+        final pendingLink = _pendingBallLinks.cast<_PendingBallLink?>().firstWhere(
+          (link) => link?.localStrokeId == null,
+          orElse: () => null,
+        );
+        if (pendingLink != null) {
+          pendingLink.localStrokeId = storedStroke.localId!;
+          await _flushPendingBallLinks();
+        } else {
+          _diagnosticController.add(
+            'Stored stroke ${storedStroke.packetId} without a pending trigger token.',
+          );
+        }
         unawaited(_syncService.syncPending(_repository));
       }
     } catch (error) {
@@ -382,6 +440,7 @@ class AppController {
     await _transportStateSubscription?.cancel();
     await _activeSessionSubscription?.cancel();
     await _syncStatusSubscription?.cancel();
+    await _ballDataSubscription?.cancel();
     await _mockTransport.dispose();
     await _realTransport?.dispose();
     await _syncService.dispose();
@@ -391,6 +450,26 @@ class AppController {
     await _livePuttStateController.close();
     await _bleLatencyController.close();
     await _impactToBleLatencyController.close();
+  }
+
+  Future<void> _flushPendingBallLinks() async {
+    while (_pendingBallLinks.isNotEmpty) {
+      final pending = _pendingBallLinks.first;
+      if (pending.localStrokeId == null || pending.ballAnalysis == null) {
+        return;
+      }
+      final linkedStroke = await _repository.attachBallAnalysisToStroke(
+        localStrokeId: pending.localStrokeId!,
+        ballAnalysis: pending.ballAnalysis!,
+      );
+      _pendingBallLinks.removeFirst();
+      if (linkedStroke == null) {
+        continue;
+      }
+      _diagnosticController.add(
+        'Linked ball analysis to stroke ${linkedStroke.packetId}.',
+      );
+    }
   }
 
   String? _decodeLiveState(Uint8List bytes) {

@@ -240,6 +240,35 @@ class SessionRepository {
         .write(db.StoredStrokesCompanion(renderedAtMs: Value(renderedAtMs)));
   }
 
+  Future<StoredStroke?> attachBallAnalysisToStroke({
+    required int localStrokeId,
+    required BallStrokeAnalysis ballAnalysis,
+  }) async {
+    final strokeRow =
+        await (_database.select(_database.storedStrokes)
+              ..where((tbl) => tbl.id.equals(localStrokeId))
+              ..limit(1))
+            .getSingleOrNull();
+    if (strokeRow == null) {
+      return null;
+    }
+
+    await (_database.update(_database.storedStrokes)
+          ..where((tbl) => tbl.id.equals(localStrokeId)))
+        .write(
+          db.StoredStrokesCompanion(
+            rollStatus: Value(ballAnalysis.toJsonString()),
+          ),
+        );
+
+    final updatedRow =
+        await (_database.select(_database.storedStrokes)
+              ..where((tbl) => tbl.id.equals(localStrokeId))
+              ..limit(1))
+            .getSingleOrNull();
+    return updatedRow == null ? null : _mapStoredStroke(updatedRow);
+  }
+
   Future<void> markStrokeSyncing(int localStrokeId) async {
     await (_database.update(
       _database.storedStrokes,
@@ -296,6 +325,7 @@ class SessionRepository {
     final rawBytes = Uint8List.fromList(row.rawPacketBytes);
     final rawPacket = _codec.decodeRawStrokePacket(rawBytes);
     final metrics = processStrokePacket(rawPacket, codec: _codec);
+    final ballAnalysis = BallStrokeAnalysis.tryParse(row.rollStatus);
     return StoredStroke(
       localId: row.id,
       localSessionId: row.localSessionId,
@@ -319,6 +349,7 @@ class SessionRepository {
         renderedAtMs: row.renderedAtMs,
         syncedAtMs: row.syncedAtMs,
       ),
+      ballAnalysis: ballAnalysis,
     );
   }
 }

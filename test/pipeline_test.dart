@@ -3,6 +3,7 @@ import 'package:designcode/data/mock_stroke_data.dart';
 import 'package:designcode/models/stroke_packet.dart';
 import 'package:designcode/packet_codec.dart';
 import 'package:designcode/services/app_controller.dart';
+import 'package:designcode/services/ball_data_service.dart';
 import 'package:designcode/services/mock_ble_service.dart';
 import 'package:designcode/services/packet_reassembler.dart';
 import 'package:designcode/services/parser.dart';
@@ -13,6 +14,8 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('packet pipeline', () {
     final codec = const PacketCodec();
     final parser = PacketParser(codec: codec);
@@ -301,6 +304,7 @@ void main() {
           repository: repository,
           syncService: DisabledSyncService(),
           mockTransport: firstMock,
+          ballDataStream: const Stream<BallData>.empty(),
         );
 
         await firstController.initialize();
@@ -324,6 +328,7 @@ void main() {
           repository: repository,
           syncService: DisabledSyncService(),
           mockTransport: secondMock,
+          ballDataStream: const Stream<BallData>.empty(),
         );
 
         await secondController.initialize();

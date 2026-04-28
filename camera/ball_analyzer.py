@@ -60,20 +60,7 @@ TRACK_POINT_QUALITY = 0.03
 TRACK_POINT_COUNT = 24
 # -----------------------------------------------------------
 
-# ---- EQUATOR LINE DETECTION ----
-MIN_LINE_RATIO = 0.4
-MAX_LINE_GAP = 8
-MAX_CENTER_DIST_RATIO = 0.45
-WOBBLE_THRESHOLD_DEG = 5.0
-LINE_BLACKHAT_PERCENTILE = 86
-LINE_BLACKHAT_MIN_THRESHOLD = 10
-LINE_DARK_PIXEL_PERCENTILE = 28
-LINE_MIN_ELONGATION = 1.35
-LINE_TRACK_MIN_FEATURES = 4
-LINE_TRACK_MAX_ERROR = 20.0
-LINE_TRACK_POINT_COUNT = 20
-LINE_TRACK_POINT_QUALITY = 0.02
-# --------------------------------
+DRIFT_THRESHOLD_DEG = 2.0   # path drift below this = "good" straight roll
 
 # ---- LOW LIGHT ADAPTATION ----
 LOW_LIGHT_THRESHOLD = 90          # mean raw brightness (0-255) below this = low-light mode
@@ -263,121 +250,6 @@ def odd_clamped(value, low, high):
     return min(value, high if high % 2 == 1 else high - 1)
 
 
-def build_line_band_mask(shape, line, thickness):
-    """Create a thin mask around an inferred equator line."""
-    mask = np.zeros(shape, dtype=np.uint8)
-    lx1, ly1, lx2, ly2 = line
-    cv2.line(mask, (lx1, ly1), (lx2, ly2), 255, max(int(thickness), 1))
-    return mask
-
-
-def refresh_line_tracker_points(gray_eq, roi_origin, line_mask, inner_r):
-    """Pick trackable points on or near the equator stripe."""
-    x1, y1 = roi_origin
-    mask = np.zeros_like(gray_eq, dtype=np.uint8)
-    roi_h, roi_w = line_mask.shape
-    mask[y1:y1 + roi_h, x1:x1 + roi_w] = line_mask
-
-    kernel_size = odd_clamped(inner_r * 0.4, 3, 7)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    mask = cv2.dilate(mask, kernel, iterations=1)
-
-    points = cv2.goodFeaturesToTrack(
-        gray_eq,
-        maxCorners=LINE_TRACK_POINT_COUNT,
-        qualityLevel=LINE_TRACK_POINT_QUALITY,
-        minDistance=max(inner_r * 0.2, 2),
-        blockSize=3,
-        mask=mask,
-    )
-    if points is None or len(points) < LINE_TRACK_MIN_FEATURES:
-        return None
-    return points.astype(np.float32)
-
-
-def initialize_line_tracker(gray_eq, roi_origin, line_mask, inner_r, line_angle):
-    """Initialize optical-flow tracking for the equator line."""
-    points = refresh_line_tracker_points(gray_eq, roi_origin, line_mask, inner_r)
-    if points is None:
-        return None
-
-    return {
-        "prev_gray": gray_eq.copy(),
-        "points": points,
-        "angle": float(line_angle),
-    }
-
-
-def track_line_motion(gray_eq, line_tracker_state, cx, cy, radius):
-    """Propagate equator orientation using optical flow between frames."""
-    if line_tracker_state is None or line_tracker_state.get("points") is None:
-        return None, None
-
-    prev_gray = line_tracker_state["prev_gray"]
-    prev_points = line_tracker_state["points"]
-    next_points, status, err = cv2.calcOpticalFlowPyrLK(
-        prev_gray,
-        gray_eq,
-        prev_points,
-        None,
-        winSize=(13, 13),
-        maxLevel=2,
-        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
-    )
-    if next_points is None or status is None:
-        return None, None
-
-    status = status.reshape(-1).astype(bool)
-    good_new = next_points.reshape(-1, 2)[status]
-    if err is not None:
-        good_err = err.reshape(-1)[status]
-        good_new = good_new[good_err <= LINE_TRACK_MAX_ERROR]
-
-    if len(good_new) < LINE_TRACK_MIN_FEATURES:
-        return None, None
-
-    center = np.array([cx, cy], dtype=np.float32)
-    keep = np.linalg.norm(good_new - center, axis=1) <= radius * 1.35
-    good_new = good_new[keep]
-    if len(good_new) < LINE_TRACK_MIN_FEATURES:
-        return None, None
-
-    fit = cv2.fitLine(good_new.reshape(-1, 1, 2), cv2.DIST_L2, 0, 0.01, 0.01).reshape(-1)
-    vx, vy, x0, y0 = [float(v) for v in fit]
-
-    half_len = max(radius * 0.9, 6.0)
-    lx1 = int(round(x0 - vx * half_len))
-    ly1 = int(round(y0 - vy * half_len))
-    lx2 = int(round(x0 + vx * half_len))
-    ly2 = int(round(y0 + vy * half_len))
-    angle = math.atan2(ly2 - ly1, lx2 - lx1)
-    if angle < 0:
-        angle += math.pi
-
-    band_mask = build_line_band_mask(gray_eq.shape, (lx1, ly1, lx2, ly2), max(radius * 0.22, 2))
-    ball_mask = build_tracking_mask(gray_eq.shape, cx, cy, radius)
-    band_mask = cv2.bitwise_and(band_mask, ball_mask)
-    refreshed_points = cv2.goodFeaturesToTrack(
-        gray_eq,
-        maxCorners=LINE_TRACK_POINT_COUNT,
-        qualityLevel=LINE_TRACK_POINT_QUALITY,
-        minDistance=max(radius * 0.18, 2),
-        blockSize=3,
-        mask=band_mask,
-    )
-    if refreshed_points is None or len(refreshed_points) < LINE_TRACK_MIN_FEATURES:
-        refreshed_points = good_new.reshape(-1, 1, 2).astype(np.float32)
-
-    new_state = {
-        "prev_gray": gray_eq.copy(),
-        "points": refreshed_points,
-        "angle": angle,
-    }
-    return {
-        "line": (lx1, ly1, lx2, ly2),
-        "angle": angle,
-        "source": "line_track",
-    }, new_state
 
 
 def score_ball_candidate(gray_eq, hsv, white_mask, edge_map, cx, cy, radius, tracking_hint=None, low_light=False):
@@ -609,120 +481,20 @@ def track_ball_motion(gray_eq, hsv, white_mask, edge_map, tracker_state, low_lig
     return (tracked_candidate, tracked_points), new_tracker_state
 
 
-def detect_equator_line(roi_eq, roi_cx, roi_cy, inner_r):
-    """Detect a dark equator stripe inside the already-detected ball ROI."""
-    roi_h, roi_w = roi_eq.shape
-    cmask = np.zeros((roi_h, roi_w), dtype=np.uint8)
-    cv2.circle(cmask, (roi_cx, roi_cy), inner_r, 255, -1)
-
-    inner_values = roi_eq[cmask > 0]
-    if inner_values.size < 20:
-        return None, cmask, None
-
-    kernel_size = odd_clamped(inner_r * 0.7, 3, 9)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    blackhat = cv2.morphologyEx(roi_eq, cv2.MORPH_BLACKHAT, kernel)
-    blackhat = cv2.bitwise_and(blackhat, blackhat, mask=cmask)
-
-    line_mask = np.zeros_like(roi_eq, dtype=np.uint8)
-    response_thresh = max(
-        LINE_BLACKHAT_MIN_THRESHOLD,
-        int(np.percentile(blackhat[cmask > 0], LINE_BLACKHAT_PERCENTILE)),
-    )
-    line_mask[blackhat >= response_thresh] = 255
-    line_mask = cv2.bitwise_and(line_mask, cmask)
-
-    if cv2.countNonZero(line_mask) < max(6, inner_r):
-        dark_thresh = int(np.percentile(inner_values, LINE_DARK_PIXEL_PERCENTILE))
-        line_mask = np.zeros_like(roi_eq, dtype=np.uint8)
-        line_mask[roi_eq <= dark_thresh] = 255
-        line_mask = cv2.bitwise_and(line_mask, cmask)
-
-    kernel3 = np.ones((3, 3), dtype=np.uint8)
-    line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_OPEN, kernel3)
-    line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_CLOSE, kernel3)
-    line_mask = cv2.bitwise_and(line_mask, cmask)
-
-    contours, _ = cv2.findContours(line_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None, cmask, line_mask
-
-    best = None
-    best_score = -1.0
-    max_center_dist = max(inner_r * MAX_CENTER_DIST_RATIO, 2.0)
-    min_major = max(inner_r * MIN_LINE_RATIO, 5.0)
-
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        if area < 3.0:
-            continue
-
-        (_, _), (rw, rh), _ = cv2.minAreaRect(contour)
-        major = max(rw, rh)
-        minor = max(min(rw, rh), 1.0)
-        if major < min_major:
-            continue
-
-        elongation = major / minor
-        if elongation < LINE_MIN_ELONGATION:
-            continue
-
-        fit = cv2.fitLine(contour, cv2.DIST_L2, 0, 0.01, 0.01).reshape(-1)
-        vx, vy, x0, y0 = [float(v) for v in fit]
-
-        pts = contour.reshape(-1, 2).astype(np.float32)
-        residual = float(np.mean(np.abs(vy * (pts[:, 0] - x0) - vx * (pts[:, 1] - y0))))
-        center_dist = abs(vy * (roi_cx - x0) - vx * (roi_cy - y0))
-        if center_dist > max_center_dist:
-            continue
-
-        score = major * min(elongation, 6.0) * (1.0 - center_dist / max_center_dist) / (1.0 + residual)
-        if score > best_score:
-            best_score = score
-            best = (vx, vy, x0, y0, major)
-
-    if best is None:
-        return None, cmask, line_mask
-
-    vx, vy, x0, y0, major = best
-    half_len = max(inner_r * 0.95, major * 0.6)
-    lx1 = int(round(x0 - vx * half_len))
-    ly1 = int(round(y0 - vy * half_len))
-    lx2 = int(round(x0 + vx * half_len))
-    ly2 = int(round(y0 + vy * half_len))
-
-    lx1 = int(np.clip(lx1, 0, roi_w - 1))
-    ly1 = int(np.clip(ly1, 0, roi_h - 1))
-    lx2 = int(np.clip(lx2, 0, roi_w - 1))
-    ly2 = int(np.clip(ly2, 0, roi_h - 1))
-
-    angle = math.atan2(ly2 - ly1, lx2 - lx1)
-    if angle < 0:
-        angle += math.pi
-
-    return {
-        "line": (lx1, ly1, lx2, ly2),
-        "angle": angle,
-        "source": "line_detect",
-    }, cmask, line_mask
 
 
-def process_frame(frame, hough_param2=None, tracking_hint=None, tracker_state=None, line_tracker_state=None):
+def process_frame(frame, hough_param2=None, tracking_hint=None, tracker_state=None, prev_center=None):
     """
-    Find the ball by shape, then find the equator line.
+    Find the ball and draw an orientation line in the direction of motion.
 
     Returns:
-        ball_found  (bool)
-        cx, cy, radius (int)
-        line_found  (bool)
-        angle       (float | None), normalized to [0, pi)
-        debug_frame (ndarray)
+        result dict  (ball_found, cx, cy, radius, debug_frame, tracking_mode)
+        tracker_state
     """
     if hough_param2 is None:
         hough_param2 = HOUGH_PARAM2
 
     debug = frame.copy()
-    h, w = frame.shape[:2]
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     mean_brightness = float(np.mean(gray))
@@ -762,7 +534,6 @@ def process_frame(frame, hough_param2=None, tracking_hint=None, tracker_state=No
                 tracker_state["cy"],
                 tracker_state["radius"],
             )
-
         best_candidate, scored_candidates = find_best_ball_candidate(
             gray_eq=gray_eq,
             blurred=blurred,
@@ -785,11 +556,9 @@ def process_frame(frame, hough_param2=None, tracking_hint=None, tracker_state=No
     if best_candidate is None:
         return {
             "ball_found": False,
-            "line_found": False,
-            "angle": None,
             "debug_frame": debug,
             "tracking_mode": tracking_mode,
-        }, None, None
+        }, None
 
     cx, cy, radius, best_score = best_candidate
 
@@ -825,267 +594,212 @@ def process_frame(frame, hough_param2=None, tracking_hint=None, tracker_state=No
         1,
     )
 
-    margin = 10
-    x1 = max(0, cx - radius - margin)
-    y1 = max(0, cy - radius - margin)
-    x2 = min(w, cx + radius + margin)
-    y2 = min(h, cy + radius + margin)
-    roi_eq = gray_eq[y1:y2, x1:x2]
-
-    if roi_eq.size == 0:
-        return {
-            "ball_found": True,
-            "cx": cx,
-            "cy": cy,
-            "radius": radius,
-            "line_found": False,
-            "angle": None,
-            "debug_frame": debug,
-            "tracking_mode": tracking_mode,
-        }, tracker_state, line_tracker_state
-
-    roi_h, roi_w = roi_eq.shape
-    roi_cx = cx - x1
-    roi_cy = cy - y1
-    inner_r = int(radius * 0.85)
-    tracked_line_result, line_tracker_state = track_line_motion(
-        gray_eq, line_tracker_state, cx, cy, radius
-    )
-    if tracked_line_result is not None:
-        line_result = tracked_line_result
-        cmask = build_tracking_mask((roi_h, roi_w), roi_cx, roi_cy, inner_r)
-        local_line = (
-            tracked_line_result["line"][0] - x1,
-            tracked_line_result["line"][1] - y1,
-            tracked_line_result["line"][2] - x1,
-            tracked_line_result["line"][3] - y1,
-        )
-        line_mask = build_line_band_mask((roi_h, roi_w), local_line, max(inner_r * 0.18, 2))
-    else:
-        line_result, cmask, line_mask = detect_equator_line(roi_eq, roi_cx, roi_cy, inner_r)
-
-    if line_mask is not None:
-        line_overlay = np.zeros_like(debug[y1:y2, x1:x2])
-        line_overlay[:, :, 2] = line_mask
-        debug[y1:y2, x1:x2] = cv2.addWeighted(debug[y1:y2, x1:x2], 1.0, line_overlay, 0.18, 0)
-
-    if line_result is None:
-        roi_masked = cv2.bitwise_and(roi_eq, roi_eq, mask=cmask)
-        roi_canny_lo = LOW_LIGHT_CANNY_LO if low_light else 40
-        roi_canny_hi = LOW_LIGHT_CANNY_HI if low_light else 100
-        edges = cv2.Canny(roi_masked, roi_canny_lo, roi_canny_hi)
-
-        min_len = max(int(inner_r * MIN_LINE_RATIO), 8)
-        lines = cv2.HoughLinesP(
-            edges,
-            1,
-            np.pi / 180,
-            threshold=12,
-            minLineLength=min_len,
-            maxLineGap=MAX_LINE_GAP,
-        )
-
-        if lines is None or len(lines) == 0:
-            return {
-                "ball_found": True,
-                "cx": cx,
-                "cy": cy,
-                "radius": radius,
-                "line_found": False,
-                "angle": None,
-                "debug_frame": debug,
-                "tracking_mode": tracking_mode,
-            }, tracker_state, None
-
-        best_line = None
-        best_score = -1.0
-        max_dist = radius * MAX_CENTER_DIST_RATIO
-
-        for line in lines:
-            lx1, ly1, lx2, ly2 = line[0]
-            length = math.hypot(lx2 - lx1, ly2 - ly1)
-
-            a = ly2 - ly1
-            b = lx1 - lx2
-            c = lx2 * ly1 - lx1 * ly2
-            denom = math.hypot(a, b)
-            if denom == 0:
-                continue
-
-            dist = abs(a * roi_cx + b * roi_cy + c) / denom
-            if dist > max_dist:
-                continue
-
-            score = length * (1.0 - dist / max_dist)
-            if score > best_score:
-                best_score = score
-                best_line = line[0]
-
-        if best_line is None:
-            return {
-                "ball_found": True,
-                "cx": cx,
-                "cy": cy,
-                "radius": radius,
-                "line_found": False,
-                "angle": None,
-                "debug_frame": debug,
-                "tracking_mode": tracking_mode,
-            }, tracker_state, None
-
-        lx1, ly1, lx2, ly2 = best_line
-        angle = math.atan2(ly2 - ly1, lx2 - lx1)
-        if angle < 0:
-            angle += math.pi
-        line_source = "line_hough"
-        fallback_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
-        cv2.line(fallback_mask, (lx1, ly1), (lx2, ly2), 255, max(int(inner_r * 0.2), 2))
-        line_tracker_state = initialize_line_tracker(gray_eq, (x1, y1), fallback_mask, inner_r, angle)
-    else:
-        lx1, ly1, lx2, ly2 = line_result["line"]
-        angle = line_result["angle"]
-        line_source = line_result.get("source", "line_detect")
-        if tracked_line_result is None:
-            line_tracker_state = initialize_line_tracker(
-                gray_eq, (x1, y1), line_mask, inner_r, angle
+    # Draw orientation line through ball center in the direction of motion.
+    if prev_center is not None:
+        dx = cx - prev_center[0]
+        dy = cy - prev_center[1]
+        dist = math.hypot(dx, dy)
+        if dist > 0.5:
+            nx, ny = dx / dist, dy / dist
+            half_len = max(radius * 1.4, 10.0)
+            ox1 = int(round(cx - nx * half_len))
+            oy1 = int(round(cy - ny * half_len))
+            ox2 = int(round(cx + nx * half_len))
+            oy2 = int(round(cy + ny * half_len))
+            # Lateral deviation from vertical (ball always moves top-to-bottom).
+            lateral_deg = math.degrees(math.atan2(dx, max(dy, 0.1)))
+            lateral_abs = abs(lateral_deg)
+            if lateral_abs < DRIFT_THRESHOLD_DEG:
+                orient_color = (0, 220, 0)
+            elif lateral_abs < 10.0:
+                orient_color = (0, 165, 255)
+            else:
+                orient_color = (0, 0, 255)
+            cv2.line(debug, (ox1, oy1), (ox2, oy2), orient_color, 2)
+            drift_dir = "R" if lateral_deg > 0 else "L"
+            cv2.putText(
+                debug,
+                "drift {:.1f}deg {}".format(lateral_abs, drift_dir),
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2,
             )
-
-    if lx1 == lx2 and ly1 == ly2:
-        return {
-            "ball_found": True,
-            "cx": cx,
-            "cy": cy,
-            "radius": radius,
-            "line_found": False,
-            "angle": None,
-            "debug_frame": debug,
-            "tracking_mode": tracking_mode,
-        }, tracker_state, line_tracker_state
-
-    cv2.line(debug, (lx1 + x1, ly1 + y1), (lx2 + x1, ly2 + y1), (0, 0, 255), 2)
-    cv2.putText(
-        debug,
-        "angle: {:.1f} deg {}".format(math.degrees(angle), line_source),
-        (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (0, 0, 255),
-        2,
-    )
 
     return {
         "ball_found": True,
         "cx": cx,
         "cy": cy,
         "radius": radius,
-        "line_found": True,
-        "angle": angle,
         "debug_frame": debug,
         "tracking_mode": tracking_mode,
-        "line_source": line_source,
-    }, tracker_state, line_tracker_state
+    }, tracker_state
 
 
 def analyze_putt(frames, fps):
-    """Process all captured frames and compute rotation rate plus wobble."""
+    """Process all captured frames and compute path drift and roll straightness."""
     results = []
     tracker_state = None
-    line_tracker_state = None
     tracking_hint = None
     tracking_misses = 0
-    for frame in frames:
-        result, tracker_state, line_tracker_state = process_frame(
+    centers = []  # (cx, cy) for each frame where ball was found
+    radii = []
+
+    for i, frame in enumerate(frames):
+        # Pass center from 2 frames ago as the orientation reference — averaging
+        # over a 2-step window smooths out per-frame jitter from camera shake.
+        prev_center = centers[-2] if len(centers) >= 2 else (centers[-1] if centers else None)
+        result, tracker_state = process_frame(
             frame,
             tracking_hint=tracking_hint,
             tracker_state=tracker_state,
-            line_tracker_state=line_tracker_state,
+            prev_center=prev_center,
         )
         results.append(result)
         if result["ball_found"]:
-            tracking_hint = (result["cx"], result["cy"], result["radius"])
+            cx, cy, r = result["cx"], result["cy"], result["radius"]
+            centers.append((cx, cy))
+            radii.append(r)
+            tracking_hint = (cx, cy, r)
             tracking_misses = 0
         else:
             tracking_misses += 1
             if tracking_misses >= TRACK_MAX_MISSES:
                 tracking_hint = None
                 tracker_state = None
-                line_tracker_state = None
-
-    valid_angles = []
-    valid_indices = []
-    for i, result in enumerate(results):
-        if result["ball_found"] and result["line_found"] and result["angle"] is not None:
-            valid_angles.append(result["angle"])
-            valid_indices.append(i)
 
     total = len(frames)
-    valid = len(valid_angles)
+    tracked = len(centers)
+    tracking_quality_pct = round(tracked / max(total, 1) * 100, 1)
+    avg_radius_px = round(float(sum(radii) / max(len(radii), 1)), 1)
 
-    if valid < 2:
-        return {
-            "rotation_rate_deg_s": 0.0,
-            "wobble_detected": False,
-            "wobble_magnitude_deg": 0.0,
-            "detection_rate": valid / max(total, 1),
-            "valid_frames": valid,
-            "total_frames": total,
-            "per_frame_results": results,
-        }
+    empty = {
+        "path_drift_deg": 0.0,
+        "rms_lateral_px": 0.0,
+        "max_lateral_px": 0.0,
+        "total_path_px": 0.0,
+        "direction_wobble_deg": 0.0,
+        "avg_radius_px": avg_radius_px,
+        "tracking_quality_pct": tracking_quality_pct,
+        "valid_frames": tracked,
+        "total_frames": total,
+        "lateral_deviations_px": [],
+        "forward_positions_px": [],
+        "per_frame_results": results,
+    }
+    if tracked < 3:
+        return empty
 
-    dt = 1.0 / fps
-    rotation_rates = []
+    # Guard: fitLine is meaningless if the ball barely moved (single cluster of points).
+    xs = [c[0] for c in centers]
+    ys = [c[1] for c in centers]
+    span = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    if span < avg_radius_px * 0.5:
+        return empty
 
-    for i in range(1, valid):
-        gap = valid_indices[i] - valid_indices[i - 1]
-        actual_dt = gap * dt
-        delta = valid_angles[i] - valid_angles[i - 1]
+    pts = np.array(centers, dtype=np.float32)
+    line_fit = cv2.fitLine(pts.reshape(-1, 1, 2), cv2.DIST_L2, 0, 0.01, 0.01).reshape(-1)
+    vx, vy, x0, y0 = [float(v) for v in line_fit]
 
-        if delta > math.pi / 2:
-            delta -= math.pi
-        if delta < -math.pi / 2:
-            delta += math.pi
+    # Ensure direction is top-to-bottom (ball always moves toward higher y).
+    if vy < 0:
+        vx, vy = -vx, -vy
 
-        rotation_rates.append(delta / actual_dt)
+    # Path drift = angle of best-fit line from vertical.
+    # atan2(vx, vy): positive = drifts right, negative = drifts left.
+    path_drift_deg = round(math.degrees(math.atan2(vx, vy)), 2)
 
-    avg_rad = sum(rotation_rates) / len(rotation_rates) if rotation_rates else 0.0
-    avg_deg = math.degrees(avg_rad)
+    # Perpendicular unit vector for lateral deviation measurement.
+    perp_x, perp_y = -vy, vx
 
-    if len(rotation_rates) >= 2:
-        variance = sum((rate - avg_rad) ** 2 for rate in rotation_rates) / len(rotation_rates)
-        wobble_deg = math.degrees(math.sqrt(variance))
+    lateral_deviations = [
+        (c[0] - x0) * perp_x + (c[1] - y0) * perp_y for c in centers
+    ]
+    forward_positions = [
+        (c[0] - x0) * vx + (c[1] - y0) * vy for c in centers
+    ]
+    fwd_offset = forward_positions[0]
+    forward_positions = [p - fwd_offset for p in forward_positions]
+
+    rms_lateral = math.sqrt(sum(d * d for d in lateral_deviations) / tracked)
+    max_lateral = max(abs(d) for d in lateral_deviations)
+    total_path_px = sum(
+        math.hypot(centers[i][0] - centers[i - 1][0], centers[i][1] - centers[i - 1][1])
+        for i in range(1, tracked)
+    )
+
+    # Direction wobble: RMS deviation of per-frame displacement angles from the
+    # best-fit direction. Only includes frames where the ball moved meaningfully
+    # forward — filters out pre-trigger stationary frames and early camera-shake
+    # frames where near-zero or backwards apparent motion produces garbage angles.
+    min_forward_px = avg_radius_px * 0.25
+    frame_angles = []
+    for i in range(1, tracked):
+        dx = centers[i][0] - centers[i - 1][0]
+        dy = centers[i][1] - centers[i - 1][1]
+        forward = dx * vx + dy * vy  # projection onto best-fit direction
+        if forward > min_forward_px:
+            frame_angles.append(math.degrees(math.atan2(dx, dy)))
+
+    if len(frame_angles) >= 2:
+        residuals = [a - path_drift_deg for a in frame_angles]
+        direction_wobble_deg = round(
+            math.sqrt(sum(r * r for r in residuals) / len(residuals)), 2
+        )
     else:
-        wobble_deg = 0.0
+        direction_wobble_deg = 0.0
 
     return {
-        "rotation_rate_deg_s": round(avg_deg, 1),
-        "wobble_detected": wobble_deg > WOBBLE_THRESHOLD_DEG,
-        "wobble_magnitude_deg": round(wobble_deg, 1),
-        "detection_rate": round(valid / total, 2),
-        "valid_frames": valid,
+        "path_drift_deg": path_drift_deg,
+        "rms_lateral_px": round(rms_lateral, 1),
+        "max_lateral_px": round(max_lateral, 1),
+        "total_path_px": round(total_path_px, 1),
+        "direction_wobble_deg": direction_wobble_deg,
+        "avg_radius_px": avg_radius_px,
+        "tracking_quality_pct": tracking_quality_pct,
+        "valid_frames": tracked,
         "total_frames": total,
+        "lateral_deviations_px": [round(d, 1) for d in lateral_deviations],
+        "forward_positions_px": [round(p, 1) for p in forward_positions],
         "per_frame_results": results,
     }
 
 
 def print_results(metrics):
+    tracked = metrics["valid_frames"]
+    total = metrics["total_frames"]
+    quality = metrics.get("tracking_quality_pct", round(tracked / max(total, 1) * 100, 1))
+    drift = metrics.get("path_drift_deg", 0.0)
+    rms = metrics.get("rms_lateral_px", 0.0)
+    mx = metrics.get("max_lateral_px", 0.0)
+    avg_r = metrics.get("avg_radius_px", 0.0)
+    wobble = metrics.get("direction_wobble_deg", 0.0)
+
     print("\n" + "=" * 50)
-    print("  PUTT ANALYSIS RESULTS")
+    print("  PATH ANALYSIS RESULTS")
     print("=" * 50)
-    print("  frames captured:   {}".format(metrics["total_frames"]))
-    print(
-        "  frames with line:  {} ({:.0f}%)".format(
-            metrics["valid_frames"], metrics["detection_rate"] * 100
-        )
-    )
+    print("  frames tracked:      {}/{} ({:.0f}%)".format(tracked, total, quality))
     print("")
-    print("  rotation rate:     {:.1f} deg/s".format(metrics["rotation_rate_deg_s"]))
-    print("  wobble detected:   {}".format("YES" if metrics["wobble_detected"] else "NO"))
-    print("  wobble magnitude:  {:.1f} deg".format(metrics["wobble_magnitude_deg"]))
-    print("=" * 50)
-    if metrics["wobble_detected"]:
-        print("  NOTE: wobble indicates off-center contact or unstable roll axis")
+
+    if tracked < 3:
+        print("  path drift:          n/a (tracking insufficient)")
+        print("  path straightness:   n/a")
+        print("  direction wobble:    n/a")
     else:
-        print("  clean end-over-end roll detected")
+        drift_dir = "right" if drift > 0 else "left"
+        drift_label = (
+            "GOOD" if abs(drift) < DRIFT_THRESHOLD_DEG
+            else "MODERATE" if abs(drift) < 5.0
+            else "SIGNIFICANT"
+        )
+        rms_diam = rms / (avg_r * 2) if avg_r > 0 else 0.0
+        straight_label = "VERY STRAIGHT" if rms_diam < 0.05 else "STRAIGHT" if rms_diam < 0.12 else "WOBBLY"
+        wobble_label = "SMOOTH" if wobble < 2.0 else "MODERATE" if wobble < 5.0 else "WOBBLY"
+        print("  path drift:          {:.2f}° {} ({})".format(abs(drift), drift_dir, drift_label))
+        print("  RMS lateral dev:     {:.3f} ball diameters  ← {}".format(rms_diam, straight_label))
+        print("  direction wobble:    {:.2f}° RMS  ← {}".format(wobble, wobble_label))
+    print("=" * 50)
     print("")
 
 
@@ -1179,7 +893,7 @@ def main():
     last_frame_id = -1
     live_frame_counter = 0
     live_tracker_state = None
-    live_line_tracker_state = None
+    live_prev_centers = []  # ring buffer of last 2 found centers for smoothing
     live_tracking_hint = None
     live_tracking_misses = 0
     preview_fps = 0.0
@@ -1259,9 +973,7 @@ def main():
                 for i, result in enumerate(metrics["per_frame_results"]):
                     dbg = result["debug_frame"]
                     status = (
-                        "ball+line"
-                        if result["ball_found"] and result["line_found"]
-                        else "ball only"
+                        "ball tracked"
                         if result["ball_found"]
                         else "no detection"
                     )
@@ -1285,21 +997,25 @@ def main():
             should_analyze = (live_frame_counter % LIVE_ANALYZE_EVERY_N_FRAMES) == 0
             live_frame_counter += 1
             if should_analyze:
-                result, live_tracker_state, live_line_tracker_state = process_frame(
+                prev_center = live_prev_centers[-2] if len(live_prev_centers) >= 2 else (live_prev_centers[-1] if live_prev_centers else None)
+                result, live_tracker_state = process_frame(
                     frame,
                     tracking_hint=live_tracking_hint,
                     tracker_state=live_tracker_state,
-                    line_tracker_state=live_line_tracker_state,
+                    prev_center=prev_center,
                 )
                 if result["ball_found"]:
                     live_tracking_hint = (result["cx"], result["cy"], result["radius"])
+                    live_prev_centers.append((result["cx"], result["cy"]))
+                    if len(live_prev_centers) > 3:
+                        live_prev_centers.pop(0)
                     live_tracking_misses = 0
                 else:
                     live_tracking_misses += 1
                     if live_tracking_misses >= TRACK_MAX_MISSES:
                         live_tracking_hint = None
                         live_tracker_state = None
-                        live_line_tracker_state = None
+                        live_prev_centers.clear()
                 display = result["debug_frame"]
             else:
                 display = frame.copy()
@@ -1337,7 +1053,7 @@ def main():
             captured_frames = [buf_frame.copy() for buf_frame, _ in pre_trigger_buffer]
             frame_timestamps = [timestamp for _, timestamp in pre_trigger_buffer]
             live_tracker_state = None
-            live_line_tracker_state = None
+            live_prev_centers.clear()
             live_tracking_hint = None
             live_tracking_misses = 0
         if key == ord("c") and not capturing:

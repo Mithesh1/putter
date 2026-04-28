@@ -184,12 +184,7 @@ class DashboardPage extends StatelessWidget {
       initialData: BallDataService.instance.latestBallData,
       builder: (context, ballSnapshot) {
         final ballData = ballSnapshot.data;
-        return StreamBuilder<BallTimeSeries>(
-          stream: BallDataService.instance.timeseriesStream,
-          initialData: BallDataService.instance.latestTimeSeries,
-          builder: (context, ballTimeSeriesSnapshot) {
-            final ballTimeSeries = ballTimeSeriesSnapshot.data;
-            return StreamBuilder<String>(
+        return StreamBuilder<String>(
               stream: BallDataService.instance.debugStream,
               initialData: BallDataService.instance.latestDebugMessage,
               builder: (context, ballDebugSnapshot) {
@@ -269,60 +264,7 @@ class DashboardPage extends StatelessWidget {
                                                 ),
                                                     const SizedBox(height: 24),
                                                     const SectionTitle(
-                                                      title: 'Ball Motion',
-                                                    ),
-                                                    const SizedBox(height: 12),
-                                                    GridView.count(
-                                                      crossAxisCount: 2,
-                                                      shrinkWrap: true,
-                                                      physics: const NeverScrollableScrollPhysics(),
-                                                      mainAxisSpacing: 12,
-                                                      crossAxisSpacing: 12,
-                                                      childAspectRatio: 0.94,
-                                                      children: [
-                                                        BallMetricTrendCard(
-                                                          title: 'Ball Speed',
-                                                          value: ballData == null
-                                                              ? 'No data'
-                                                              : '${ballData.avgVelocityMph.toStringAsFixed(1)} mph',
-                                                          subtitle: ballData == null
-                                                              ? 'Waiting for burst'
-                                                              : 'Peak ${ballData.peakVelocityMph.toStringAsFixed(1)} mph',
-                                                          icon: Icons.speed,
-                                                          chart: ballTimeSeries == null
-                                                              ? null
-                                                              : _ballTimeSeriesChart(
-                                                                  timeSeries: ballTimeSeries,
-                                                                  values: ballTimeSeries.velocityMph,
-                                                                  label: 'Ball Speed',
-                                                                  color: const Color(0xFF00897B),
-                                                                  unitLabel: 'mph',
-                                                                ),
-                                                        ),
-                                                        BallMetricTrendCard(
-                                                          title: 'Spin',
-                                                          value: ballData == null
-                                                              ? 'No data'
-                                                              : '${ballData.rotationRateDegS.toStringAsFixed(0)} deg/s',
-                                                          subtitle: ballData == null
-                                                              ? 'Waiting for burst'
-                                                              : 'Wobble ${ballData.wobbleMagnitudeDeg.toStringAsFixed(1)}°',
-                                                          icon: Icons.sync,
-                                                          chart: ballTimeSeries == null
-                                                              ? null
-                                                              : _ballTimeSeriesChart(
-                                                                  timeSeries: ballTimeSeries,
-                                                                  values: ballTimeSeries.rotationRateDegS,
-                                                                  label: 'Spin',
-                                                                  color: const Color(0xFF6A1B9A),
-                                                                  unitLabel: 'dps',
-                                                                ),
-                                                        ),
-                                                      ],
-                                                    ),
-                                                    const SizedBox(height: 24),
-                                                    const SectionTitle(
-                                                      title: 'Ball Roll Analysis',
+                                                      title: 'Ball Path Analysis',
                                                     ),
                                                     const SizedBox(height: 12),
                                                     BallRollCard(ballData: ballData),
@@ -367,8 +309,6 @@ class DashboardPage extends StatelessWidget {
             );
           },
         );
-      },
-    );
   }
 }
 
@@ -1821,6 +1761,16 @@ class _StrokeSnapshotSection extends StatelessWidget {
             ),
             itemBuilder: (context, index) => MetricCard(data: graphMetrics[index]),
           ),
+          const SizedBox(height: 12),
+          const SectionTitle(title: 'Ball Path Analysis'),
+          const SizedBox(height: 12),
+          if (stroke!.ballAnalysis == null)
+            const EmptyStateCard(
+              title: 'No ball analysis linked yet',
+              subtitle: 'This stroke does not have a mapped camera result.',
+            )
+          else
+            BallRollCard(ballAnalysis: stroke!.ballAnalysis),
         ],
       ],
     );
@@ -2084,18 +2034,38 @@ class BallDebugCard extends StatelessWidget {
 }
 
 class BallRollCard extends StatelessWidget {
-  const BallRollCard({super.key, required this.ballData});
+  const BallRollCard({super.key, this.ballData, this.ballAnalysis});
 
   final BallData? ballData;
+  final BallStrokeAnalysis? ballAnalysis;
 
   @override
   Widget build(BuildContext context) {
-    if (ballData == null) {
+    final liveBallData = ballData;
+    final storedBallAnalysis = ballAnalysis;
+    if (liveBallData == null && storedBallAnalysis == null) {
       return const EmptyStateCard(
         title: 'No ball data yet',
-        subtitle: 'Run a burst capture to see roll analysis here.',
+        subtitle: 'Run a burst capture to see path analysis here.',
       );
     }
+    final driftAbs =
+        liveBallData?.pathDriftDeg.abs() ?? storedBallAnalysis!.pathDriftDeg.abs();
+    final driftDirection =
+        liveBallData?.driftDirection ?? storedBallAnalysis!.driftDirection;
+    final directionWobbleDeg =
+        liveBallData?.directionWobbleDeg ?? storedBallAnalysis!.directionWobbleDeg;
+    final rmsLateralPx =
+        liveBallData?.rmsLateralPx ?? storedBallAnalysis!.rmsLateralPx;
+    final rmsLateralBallDiams =
+        liveBallData?.rmsLateralBallDiams ?? storedBallAnalysis!.rmsLateralBallDiams;
+    final trackingQualityPct =
+        liveBallData?.trackingQualityPct ?? storedBallAnalysis!.trackingQualityPct;
+    final frameCount = liveBallData?.frameCount ?? storedBallAnalysis!.frameCount;
+    final fps = liveBallData?.fps ?? storedBallAnalysis!.fps;
+    final receivedLabel = liveBallData != null
+        ? 'Received ${_formatClockTime(liveBallData.receivedAt)}'
+        : 'Linked to stroke';
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(18),
@@ -2119,8 +2089,8 @@ class BallRollCard extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  '${ballData!.avgVelocityMph.toStringAsFixed(2)} mph avg'
-                  '  •  ${ballData!.peakVelocityMph.toStringAsFixed(2)} mph peak',
+                  'Drift ${driftAbs.toStringAsFixed(2)}° $driftDirection'
+                  '  •  Wobble ${directionWobbleDeg.toStringAsFixed(2)}°',
                   style: const TextStyle(
                     fontSize: 15,
                     fontWeight: FontWeight.w700,
@@ -2130,19 +2100,85 @@ class BallRollCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 12),
-          _MetricWrap(
-            values: [
-              'Roll ${ballData!.totalRollDistanceIn.toStringAsFixed(2)} in',
-              '${ballData!.totalRollDistanceBallDiam.toStringAsFixed(2)} ball diam',
-              'Spin ${ballData!.rotationRateDegS.toStringAsFixed(1)} deg/s',
-              'Wobble: ${ballData!.wobbleDetected ? "YES  ${ballData!.wobbleMagnitudeDeg.toStringAsFixed(1)}°" : "NO"}',
-              '${ballData!.frameCount} frames @ ${ballData!.fps.toStringAsFixed(1)} fps',
+          GridView.count(
+            crossAxisCount: 2,
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            mainAxisSpacing: 10,
+            crossAxisSpacing: 10,
+            childAspectRatio: 2.0,
+            children: [
+              _BallPathMetricTile(
+                title: 'Drift',
+                value: '${driftAbs.toStringAsFixed(2)}°',
+                subtitle: driftDirection,
+              ),
+              _BallPathMetricTile(
+                title: 'Wobble',
+                value: '${directionWobbleDeg.toStringAsFixed(2)}°',
+                subtitle: 'Direction RMS',
+              ),
+              _BallPathMetricTile(
+                title: 'RMS Lateral',
+                value: '${rmsLateralPx.toStringAsFixed(1)} px',
+                subtitle: 'Perpendicular RMS',
+              ),
+              _BallPathMetricTile(
+                title: 'Ball Diam Lateral',
+                value: '${rmsLateralBallDiams.toStringAsFixed(3)}',
+                subtitle: 'Ball diam RMS',
+              ),
             ],
           ),
           const SizedBox(height: 8),
           Text(
-            'Received ${_formatClockTime(ballData!.receivedAt)}',
+            '$trackingQualityPct% tracking • '
+            '$frameCount frames @ ${fps.toStringAsFixed(1)} fps • '
+            '$receivedLabel',
             style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BallPathMetricTile extends StatelessWidget {
+  const _BallPathMetricTile({
+    required this.title,
+    required this.value,
+    required this.subtitle,
+  });
+
+  final String title;
+  final String value;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF1F5F3),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            title,
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            subtitle,
+            style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
           ),
         ],
       ),
@@ -2461,6 +2497,16 @@ List<MiniChartMarker> _gyroPhaseMarkers(_LatestPuttSeries series) {
   ];
 }
 
+List<MiniChartMarker> _piezoImpactMarker(_LatestPuttSeries series) {
+  return [
+    MiniChartMarker(
+      label: _timedMarkerLabel('Impact', series.piezoImpactOffsetMs),
+      ms: series.piezoImpactOffsetMs.toDouble(),
+      color: const Color(0xFFEF6C00),
+    ),
+  ];
+}
+
 String _timedMarkerLabel(String label, int offsetMs) {
   return '$label ${offsetMs}ms';
 }
@@ -2687,6 +2733,7 @@ List<MetricCardData> _buildStrokeMetricCards(
               minY: -30,
               maxY: 30,
               unitLabel: 'deg',
+              markers: _strokePhaseMarkers(latestPuttSeries),
             ),
     ),
     MetricCardData(
@@ -2710,6 +2757,7 @@ List<MetricCardData> _buildStrokeMetricCards(
               minY: -30,
               maxY: 30,
               unitLabel: 'deg',
+              markers: _strokePhaseMarkers(latestPuttSeries),
             ),
     ),
     MetricCardData(
@@ -2733,6 +2781,7 @@ List<MetricCardData> _buildStrokeMetricCards(
               minY: -30,
               maxY: 30,
               unitLabel: 'deg',
+              markers: _strokePhaseMarkers(latestPuttSeries),
             ),
     ),
     MetricCardData(
@@ -2755,6 +2804,7 @@ List<MetricCardData> _buildStrokeMetricCards(
               minY: -30,
               maxY: 30,
               unitLabel: 'm/s²',
+              markers: _strokePhaseMarkers(latestPuttSeries),
             ),
     ),
     MetricCardData(
@@ -2777,6 +2827,7 @@ List<MetricCardData> _buildStrokeMetricCards(
               minY: -30,
               maxY: 30,
               unitLabel: 'm/s²',
+              markers: _strokePhaseMarkers(latestPuttSeries),
             ),
     ),
     MetricCardData(
@@ -2799,6 +2850,7 @@ List<MetricCardData> _buildStrokeMetricCards(
               minY: -30,
               maxY: 30,
               unitLabel: 'm/s²',
+              markers: _strokePhaseMarkers(latestPuttSeries),
             ),
     ),
     MetricCardData(
@@ -2823,6 +2875,7 @@ List<MetricCardData> _buildStrokeMetricCards(
               minY: 0,
               maxY: 500,
               unitLabel: 'raw',
+              markers: _piezoImpactMarker(latestPuttSeries),
             ),
     ),
     MetricCardData(
@@ -2847,6 +2900,7 @@ List<MetricCardData> _buildStrokeMetricCards(
               minY: 0,
               maxY: 500,
               unitLabel: 'raw',
+              markers: _piezoImpactMarker(latestPuttSeries),
             ),
     ),
   ];

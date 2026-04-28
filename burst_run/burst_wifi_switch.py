@@ -1,20 +1,19 @@
 """
 Higher-resolution burst capture client for the OV5640 ESP32-S3 setup.
 
-This script talks to the burst camera board over HTTP:
+This script talks to test_burst/test_burst.ino over HTTP:
 1. Trigger a burst capture on the ESP32.
 2. Download the saved JPEG frames after capture completes.
-3. Reuse the existing local ball analysis pipeline on those frames.
-4. Push the processed metrics to the frontend over Bluetooth (BLE).
+3. Reuse the existing ball analysis pipeline on those frames.
+4. Push the processed metrics to Nathan's iPad via Bluetooth (BLE).
 5. Let the user step through analyzed frames afterward.
 
-Requires:
-    pip install bless
+Requires: pip install bless
 """
 
 import asyncio
-import http.client
 import json
+import http.client
 import math
 import socket
 import struct
@@ -61,42 +60,33 @@ FRAME_DOWNLOAD_TIMEOUT = 20
 FRAME_DOWNLOAD_RETRIES = 4
 FRAME_DOWNLOAD_RETRY_DELAY_S = 0.35
 MIN_JPEG_BYTES = 1024
-STATIONARY_GATE_DIAMETERS = 0.45
-POST_TRIGGER_ANCHOR_HOLD_FRAMES = 2
-RELEASE_MIN_STEP_DIAMETERS = 0.30
-RELEASE_CONFIRM_FRAMES = 2
-MAX_TRACK_STEP_DIAMETERS = 2.20
-MAX_PREDICTION_ERROR_DIAMETERS = 1.30
-MAX_RADIUS_CHANGE_RATIO = 0.45
-MAX_HOLD_FRAMES = 3
-MAX_SIGNATURE_DISTANCE = 0.48
-SIGNATURE_BLEND = 0.20
 
-BLE_DEVICE_NAME = "BurstAnalyzer"
+# ── BLE peripheral (iPad notifications) ─────────────────────────────────────
+BLE_DEVICE_NAME        = "BurstAnalyzer"
 BALL_DATA_SERVICE_UUID = "12340000-0000-4b59-9000-000000000001"
-BALL_DATA_CHAR_UUID = "12340000-0000-4b59-9000-000000000002"
+BALL_DATA_CHAR_UUID    = "12340000-0000-4b59-9000-000000000002"
 BALL_TRIGGER_CHAR_UUID = "12340000-0000-4b59-9000-000000000003"
+TIMESERIES_CHAR_UUID   = "12340000-0000-4b59-9000-000000000004"
 BLE_NOTIFY_RETRY_COUNT = 3
 BLE_NOTIFY_RETRY_DELAY_S = 0.2
 BLE_NOTIFY_INITIAL_DELAY_S = 0.15
 
 _ble_available = False
-_ble_loop = None
-_ble_server = None
-_ble_ready = threading.Event()
+_ble_loop      = None
+_ble_server    = None
+_ble_ready     = threading.Event()
 _capture_lock = threading.Lock()
 _capture_active = False
 
 try:
     from bless import (
         BlessServer,
-        GATTAttributePermissions,
         GATTCharacteristicProperties,
+        GATTAttributePermissions,
     )
-
     _ble_available = True
-except Exception as ble_import_error:
-    print("BLE import failed: {}".format(ble_import_error))
+except Exception as _ble_import_error:
+    print("BLE import failed: {}".format(_ble_import_error))
     print("  run: pip3 install bless")
 
 DETECTOR_SETTING_KEYS = (
@@ -128,29 +118,18 @@ def normalize_detector_settings(settings):
     )
     normalized["WHITE_S_MAX"] = int(np.clip(normalized["WHITE_S_MAX"], 0, 255))
     normalized["WHITE_GRAY_MIN"] = int(np.clip(normalized["WHITE_GRAY_MIN"], 0, 255))
-    normalized["WHITE_GRAY_PERCENTILE"] = int(
-        np.clip(normalized["WHITE_GRAY_PERCENTILE"], 1, 99),
-    )
-    normalized["MIN_BALL_SCORE"] = round(
-        float(np.clip(normalized["MIN_BALL_SCORE"], 0.1, 4.0)),
-        2,
-    )
-    normalized["LOW_LIGHT_THRESHOLD"] = int(
-        np.clip(normalized["LOW_LIGHT_THRESHOLD"], 0, 255),
-    )
-    normalized["LOW_LIGHT_GRAY_MIN"] = int(
-        np.clip(normalized["LOW_LIGHT_GRAY_MIN"], 0, 255),
-    )
+    normalized["WHITE_GRAY_PERCENTILE"] = int(np.clip(normalized["WHITE_GRAY_PERCENTILE"], 1, 99))
+    normalized["MIN_BALL_SCORE"] = round(float(np.clip(normalized["MIN_BALL_SCORE"], 0.1, 4.0)), 2)
+    normalized["LOW_LIGHT_THRESHOLD"] = int(np.clip(normalized["LOW_LIGHT_THRESHOLD"], 0, 255))
+    normalized["LOW_LIGHT_GRAY_MIN"] = int(np.clip(normalized["LOW_LIGHT_GRAY_MIN"], 0, 255))
     normalized["LOW_LIGHT_HOUGH_PARAM2_DELTA"] = int(
-        np.clip(normalized["LOW_LIGHT_HOUGH_PARAM2_DELTA"], 0, 40),
+        np.clip(normalized["LOW_LIGHT_HOUGH_PARAM2_DELTA"], 0, 40)
     )
     return normalized
 
 
 def collect_detector_settings():
-    return normalize_detector_settings(
-        {key: getattr(ba, key) for key in DETECTOR_SETTING_KEYS},
-    )
+    return normalize_detector_settings({key: getattr(ba, key) for key in DETECTOR_SETTING_KEYS})
 
 
 def apply_detector_settings(settings):
@@ -172,14 +151,9 @@ def load_detector_settings():
 
 def save_detector_settings(settings):
     normalized = normalize_detector_settings(settings)
-    CALIBRATION_PATH.write_text(
-        json.dumps(normalized, indent=2),
-        encoding="utf-8",
-    )
+    CALIBRATION_PATH.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
     if not CALIBRATION_PATH.exists():
-        raise RuntimeError(
-            "failed to create calibration file at {}".format(CALIBRATION_PATH),
-        )
+        raise RuntimeError("failed to create calibration file at {}".format(CALIBRATION_PATH))
     return normalized
 
 
@@ -201,12 +175,7 @@ def read_command():
 
 
 def is_complete_jpeg(data):
-    return (
-        bool(data)
-        and len(data) >= MIN_JPEG_BYTES
-        and data[:2] == b"\xff\xd8"
-        and data[-2:] == b"\xff\xd9"
-    )
+    return bool(data) and len(data) >= MIN_JPEG_BYTES and data[:2] == b"\xff\xd8" and data[-2:] == b"\xff\xd9"
 
 
 def fetch_bytes(url, timeout=FRAME_DOWNLOAD_TIMEOUT, retries=FRAME_DOWNLOAD_RETRIES):
@@ -224,9 +193,7 @@ def fetch_bytes(url, timeout=FRAME_DOWNLOAD_TIMEOUT, retries=FRAME_DOWNLOAD_RETR
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 payload = response.read()
             if not is_complete_jpeg(payload):
-                raise RuntimeError(
-                    "incomplete jpeg payload ({} bytes)".format(len(payload)),
-                )
+                raise RuntimeError("incomplete jpeg payload ({} bytes)".format(len(payload)))
             return payload
         except (
             TimeoutError,
@@ -252,9 +219,7 @@ def trigger_burst():
             return {"accepted": response.status in (200, 202)}
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            "burst trigger failed: HTTP {} {}".format(exc.code, body),
-        ) from exc
+        raise RuntimeError("burst trigger failed: HTTP {} {}".format(exc.code, body)) from exc
 
 
 def wait_for_ready(timeout_s=READY_TIMEOUT):
@@ -271,27 +236,11 @@ def wait_for_ready(timeout_s=READY_TIMEOUT):
         if state == "ready":
             return status
         if state == "error":
-            raise RuntimeError(
-                "device reported error: {}".format(status.get("error", "unknown")),
-            )
+            raise RuntimeError("device reported error: {}".format(status.get("error", "unknown")))
 
         time.sleep(POLL_INTERVAL)
 
     raise RuntimeError("timed out waiting for burst capture")
-
-
-def download_frame(frame_id):
-    try:
-        jpg = fetch_bytes(FRAME_URL_TEMPLATE.format(index=frame_id))
-    except Exception as exc:
-        raise RuntimeError(
-            "failed downloading frame {} after retries".format(frame_id),
-        ) from exc
-    arr = np.frombuffer(jpg, dtype=np.uint8)
-    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if frame is None:
-        raise RuntimeError("failed to decode frame {}".format(frame_id))
-    return frame
 
 
 def download_frames(manifest):
@@ -327,15 +276,12 @@ def estimate_fps(manifest):
 
 
 def resize_for_screen(image, max_width=1700, max_height=950):
-    height, width = image.shape[:2]
-    scale = min(max_width / float(width), max_height / float(height), 1.0)
+    h, w = image.shape[:2]
+    scale = min(max_width / float(w), max_height / float(h), 1.0)
     if scale >= 1.0:
         return image
-    return cv2.resize(
-        image,
-        (int(round(width * scale)), int(round(height * scale))),
-        interpolation=cv2.INTER_AREA,
-    )
+    resized = cv2.resize(image, (int(round(w * scale)), int(round(h * scale))), interpolation=cv2.INTER_AREA)
+    return resized
 
 
 def build_frame_times(manifest, total, fps):
@@ -356,127 +302,48 @@ def default_calibration_frame_index(manifest, total_frames):
     return 0
 
 
+def download_frame(frame_id):
+    try:
+        jpg = fetch_bytes(FRAME_URL_TEMPLATE.format(index=frame_id))
+    except Exception as exc:
+        raise RuntimeError("failed downloading frame {} after retries".format(frame_id)) from exc
+    arr = np.frombuffer(jpg, dtype=np.uint8)
+    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if frame is None:
+        raise RuntimeError("failed to decode frame {}".format(frame_id))
+    return frame
+
+
 def create_calibration_trackbars(total_frames, manifest):
     cv2.namedWindow(CALIBRATION_WINDOW, cv2.WINDOW_NORMAL)
     current = collect_detector_settings()
-    cv2.createTrackbar(
-        "frame",
-        CALIBRATION_WINDOW,
-        default_calibration_frame_index(manifest, total_frames),
-        max(total_frames - 1, 0),
-        lambda x: None,
-    )
-    cv2.createTrackbar(
-        "param2",
-        CALIBRATION_WINDOW,
-        int(current["HOUGH_PARAM2"]),
-        80,
-        lambda x: None,
-    )
-    cv2.createTrackbar(
-        "min radius",
-        CALIBRATION_WINDOW,
-        int(current["HOUGH_MIN_RADIUS"]),
-        60,
-        lambda x: None,
-    )
-    cv2.createTrackbar(
-        "max radius",
-        CALIBRATION_WINDOW,
-        int(current["HOUGH_MAX_RADIUS"]),
-        80,
-        lambda x: None,
-    )
-    cv2.createTrackbar(
-        "white sat",
-        CALIBRATION_WINDOW,
-        int(current["WHITE_S_MAX"]),
-        255,
-        lambda x: None,
-    )
-    cv2.createTrackbar(
-        "white gray",
-        CALIBRATION_WINDOW,
-        int(current["WHITE_GRAY_MIN"]),
-        255,
-        lambda x: None,
-    )
-    cv2.createTrackbar(
-        "gray pct",
-        CALIBRATION_WINDOW,
-        int(current["WHITE_GRAY_PERCENTILE"]),
-        99,
-        lambda x: None,
-    )
-    cv2.createTrackbar(
-        "min score x100",
-        CALIBRATION_WINDOW,
-        int(round(current["MIN_BALL_SCORE"] * 100)),
-        400,
-        lambda x: None,
-    )
-    cv2.createTrackbar(
-        "LL thresh",
-        CALIBRATION_WINDOW,
-        int(current["LOW_LIGHT_THRESHOLD"]),
-        255,
-        lambda x: None,
-    )
-    cv2.createTrackbar(
-        "LL gray",
-        CALIBRATION_WINDOW,
-        int(current["LOW_LIGHT_GRAY_MIN"]),
-        255,
-        lambda x: None,
-    )
-    cv2.createTrackbar(
-        "LL p2 delta",
-        CALIBRATION_WINDOW,
-        int(current["LOW_LIGHT_HOUGH_PARAM2_DELTA"]),
-        40,
-        lambda x: None,
-    )
+    cv2.createTrackbar("frame", CALIBRATION_WINDOW, default_calibration_frame_index(manifest, total_frames), max(total_frames - 1, 0), lambda x: None)
+    cv2.createTrackbar("param2", CALIBRATION_WINDOW, int(current["HOUGH_PARAM2"]), 80, lambda x: None)
+    cv2.createTrackbar("min radius", CALIBRATION_WINDOW, int(current["HOUGH_MIN_RADIUS"]), 60, lambda x: None)
+    cv2.createTrackbar("max radius", CALIBRATION_WINDOW, int(current["HOUGH_MAX_RADIUS"]), 80, lambda x: None)
+    cv2.createTrackbar("white sat", CALIBRATION_WINDOW, int(current["WHITE_S_MAX"]), 255, lambda x: None)
+    cv2.createTrackbar("white gray", CALIBRATION_WINDOW, int(current["WHITE_GRAY_MIN"]), 255, lambda x: None)
+    cv2.createTrackbar("gray pct", CALIBRATION_WINDOW, int(current["WHITE_GRAY_PERCENTILE"]), 99, lambda x: None)
+    cv2.createTrackbar("min score x100", CALIBRATION_WINDOW, int(round(current["MIN_BALL_SCORE"] * 100)), 400, lambda x: None)
+    cv2.createTrackbar("LL thresh", CALIBRATION_WINDOW, int(current["LOW_LIGHT_THRESHOLD"]), 255, lambda x: None)
+    cv2.createTrackbar("LL gray", CALIBRATION_WINDOW, int(current["LOW_LIGHT_GRAY_MIN"]), 255, lambda x: None)
+    cv2.createTrackbar("LL p2 delta", CALIBRATION_WINDOW, int(current["LOW_LIGHT_HOUGH_PARAM2_DELTA"]), 40, lambda x: None)
 
 
 def read_calibration_trackbars():
     return normalize_detector_settings(
         {
             "HOUGH_PARAM2": cv2.getTrackbarPos("param2", CALIBRATION_WINDOW),
-            "HOUGH_MIN_RADIUS": cv2.getTrackbarPos(
-                "min radius",
-                CALIBRATION_WINDOW,
-            ),
-            "HOUGH_MAX_RADIUS": cv2.getTrackbarPos(
-                "max radius",
-                CALIBRATION_WINDOW,
-            ),
+            "HOUGH_MIN_RADIUS": cv2.getTrackbarPos("min radius", CALIBRATION_WINDOW),
+            "HOUGH_MAX_RADIUS": cv2.getTrackbarPos("max radius", CALIBRATION_WINDOW),
             "WHITE_S_MAX": cv2.getTrackbarPos("white sat", CALIBRATION_WINDOW),
-            "WHITE_GRAY_MIN": cv2.getTrackbarPos(
-                "white gray",
-                CALIBRATION_WINDOW,
-            ),
-            "WHITE_GRAY_PERCENTILE": cv2.getTrackbarPos(
-                "gray pct",
-                CALIBRATION_WINDOW,
-            ),
-            "MIN_BALL_SCORE": cv2.getTrackbarPos(
-                "min score x100",
-                CALIBRATION_WINDOW,
-            )
-            / 100.0,
-            "LOW_LIGHT_THRESHOLD": cv2.getTrackbarPos(
-                "LL thresh",
-                CALIBRATION_WINDOW,
-            ),
-            "LOW_LIGHT_GRAY_MIN": cv2.getTrackbarPos(
-                "LL gray",
-                CALIBRATION_WINDOW,
-            ),
-            "LOW_LIGHT_HOUGH_PARAM2_DELTA": cv2.getTrackbarPos(
-                "LL p2 delta",
-                CALIBRATION_WINDOW,
-            ),
-        },
+            "WHITE_GRAY_MIN": cv2.getTrackbarPos("white gray", CALIBRATION_WINDOW),
+            "WHITE_GRAY_PERCENTILE": cv2.getTrackbarPos("gray pct", CALIBRATION_WINDOW),
+            "MIN_BALL_SCORE": cv2.getTrackbarPos("min score x100", CALIBRATION_WINDOW) / 100.0,
+            "LOW_LIGHT_THRESHOLD": cv2.getTrackbarPos("LL thresh", CALIBRATION_WINDOW),
+            "LOW_LIGHT_GRAY_MIN": cv2.getTrackbarPos("LL gray", CALIBRATION_WINDOW),
+            "LOW_LIGHT_HOUGH_PARAM2_DELTA": cv2.getTrackbarPos("LL p2 delta", CALIBRATION_WINDOW),
+        }
     )
 
 
@@ -490,10 +357,7 @@ def add_calibration_overlay(frame, result, frame_index, total_frames, manifest):
 
     lines = [
         "frame {}/{} ({})".format(frame_index + 1, total_frames, phase),
-        "mean brightness {:.1f} | low-light {}".format(
-            mean_brightness,
-            "ON" if low_light else "OFF",
-        ),
+        "mean brightness {:.1f} | low-light {}".format(mean_brightness, "ON" if low_light else "OFF"),
         "param2={} radius {}-{} score>={:.2f}".format(
             ba.HOUGH_PARAM2,
             ba.HOUGH_MIN_RADIUS,
@@ -528,10 +392,7 @@ def add_calibration_overlay(frame, result, frame_index, total_frames, manifest):
         cv2.putText(
             preview,
             "ball center=({}, {}) r={} mode={}".format(
-                result["cx"],
-                result["cy"],
-                result["radius"],
-                result.get("tracking_mode", "detect"),
+                result["cx"], result["cy"], result["radius"], result.get("tracking_mode", "detect")
             ),
             (12, y + 4),
             cv2.FONT_HERSHEY_SIMPLEX,
@@ -572,40 +433,22 @@ def run_calibration_session(manifest):
         if cv2.getWindowProperty(CALIBRATION_WINDOW, cv2.WND_PROP_VISIBLE) < 1:
             applied = apply_detector_settings(read_calibration_trackbars())
             save_detector_settings(applied)
-            print(
-                "calibration window closed; saved detector calibration to {}".format(
-                    CALIBRATION_PATH,
-                ),
-            )
+            print("calibration window closed; saved detector calibration to {}".format(CALIBRATION_PATH))
             saved = True
             break
 
-        frame_index = min(
-            cv2.getTrackbarPos("frame", CALIBRATION_WINDOW),
-            total_frames - 1,
-        )
+        frame_index = min(cv2.getTrackbarPos("frame", CALIBRATION_WINDOW), total_frames - 1)
         if frame_index != current_frame_index:
             frame_id = frame_meta[frame_index]["index"]
             if frame_id not in frame_cache:
-                print(
-                    "loading calibration frame {}/{}...".format(
-                        frame_index + 1,
-                        total_frames,
-                    ),
-                )
+                print("loading calibration frame {}/{}...".format(frame_index + 1, total_frames))
                 frame_cache[frame_id] = download_frame(frame_id)
             current_frame = frame_cache[frame_id]
             current_frame_index = frame_index
 
         applied = apply_detector_settings(read_calibration_trackbars())
-        result, _, _ = ba.process_frame(current_frame.copy())
-        preview = add_calibration_overlay(
-            current_frame,
-            result,
-            frame_index,
-            total_frames,
-            manifest,
-        )
+        result, _ = ba.process_frame(current_frame.copy())
+        preview = add_calibration_overlay(current_frame, result, frame_index, total_frames, manifest)
         cv2.imshow(CALIBRATION_WINDOW, preview)
 
         key = cv2.waitKey(30) & 0xFF
@@ -622,378 +465,100 @@ def run_calibration_session(manifest):
     return saved
 
 
-def result_candidate(result, raw=False):
-    prefix = "raw_" if raw else ""
-    if not result.get(prefix + "ball_found", False):
-        return None
-    return (
-        float(result[prefix + "cx"]),
-        float(result[prefix + "cy"]),
-        float(result[prefix + "radius"]),
-    )
 
 
-def candidate_step_diameters(a, b):
-    if a is None or b is None:
-        return float("inf")
-    avg_radius = max((float(a[2]) + float(b[2])) * 0.5, 1.0)
-    return math.hypot(float(a[0]) - float(b[0]), float(a[1]) - float(b[1])) / (
-        avg_radius * 2.0
-    )
 
 
-def candidate_radius_change(a, b):
-    if a is None or b is None:
-        return float("inf")
-    avg_radius = max((float(a[2]) + float(b[2])) * 0.5, 1.0)
-    return abs(float(a[2]) - float(b[2])) / avg_radius
-
-
-def predicted_candidate(prev_candidate, prev_prev_candidate):
-    if prev_candidate is None or prev_prev_candidate is None:
-        return None
-    return (
-        float(prev_candidate[0])
-        + (float(prev_candidate[0]) - float(prev_prev_candidate[0])),
-        float(prev_candidate[1])
-        + (float(prev_candidate[1]) - float(prev_prev_candidate[1])),
-        float(prev_candidate[2]),
-    )
-
-
-def snapshot_raw_results(results):
-    for result in results:
-        result["raw_ball_found"] = bool(result.get("ball_found", False))
-        result["raw_cx"] = result.get("cx")
-        result["raw_cy"] = result.get("cy")
-        result["raw_radius"] = result.get("radius")
-        result["raw_line_found"] = bool(result.get("line_found", False))
-        result["raw_angle"] = result.get("angle")
-        result["raw_tracking_mode"] = result.get(
-            "tracking_mode",
-            "detect",
-        )
-        result["raw_line_source"] = result.get("line_source", "n/a")
-
-
-def choose_anchor_candidate(results, pre_frame_count):
-    window = max(int(pre_frame_count or 0), 1)
-    candidates = [result_candidate(result, raw=True) for result in results[:window]]
-    candidates = [candidate for candidate in candidates if candidate is not None]
-    if not candidates:
-        return None
-
-    best_inliers = [candidates[0]]
-    for candidate in candidates:
-        inliers = [
-            other
-            for other in candidates
-            if candidate_step_diameters(candidate, other) <= STATIONARY_GATE_DIAMETERS
-            and candidate_radius_change(candidate, other) <= MAX_RADIUS_CHANGE_RATIO
-        ]
-        if len(inliers) > len(best_inliers):
-            best_inliers = inliers
-
-    if not best_inliers:
-        best_inliers = candidates
-
-    xs = [candidate[0] for candidate in best_inliers]
-    ys = [candidate[1] for candidate in best_inliers]
-    radii = [candidate[2] for candidate in best_inliers]
-    return (
-        float(np.median(xs)),
-        float(np.median(ys)),
-        float(np.median(radii)),
-    )
-
-
-def compute_ball_signature(frame, candidate):
-    if frame is None or candidate is None:
-        return None
-
-    cx = int(round(candidate[0]))
-    cy = int(round(candidate[1]))
-    radius = max(int(round(candidate[2] * 0.85)), 2)
-    height, width = frame.shape[:2]
-    if cx - radius < 0 or cy - radius < 0 or cx + radius >= width or cy + radius >= height:
-        return None
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = np.zeros((height, width), dtype=np.uint8)
-    cv2.circle(mask, (cx, cy), radius, 255, -1)
-    inside = mask > 0
-    if not np.any(inside):
-        return None
-
-    local_gray = gray[inside]
-    local_sat = hsv[..., 1][inside]
-    bright_floor = max(100, int(np.percentile(local_gray, 55)))
-    white_ratio = float(np.mean((local_gray >= bright_floor) & (local_sat <= 120)))
-    return {
-        "white_ratio": white_ratio,
-        "mean_gray": float(np.mean(local_gray)) / 255.0,
-        "mean_sat": float(np.mean(local_sat)) / 255.0,
-    }
-
-
-def build_anchor_signature(frames, anchor_candidate, pre_frame_count):
-    window = max(int(pre_frame_count or 0), 1)
-    signatures = []
-    for frame in frames[:window]:
-        signature = compute_ball_signature(frame, anchor_candidate)
-        if signature is not None:
-            signatures.append(signature)
-
-    if not signatures:
-        return None
-
-    return {
-        "white_ratio": float(np.median([sig["white_ratio"] for sig in signatures])),
-        "mean_gray": float(np.median([sig["mean_gray"] for sig in signatures])),
-        "mean_sat": float(np.median([sig["mean_sat"] for sig in signatures])),
-    }
-
-
-def signature_distance(signature, reference_signature):
-    if signature is None or reference_signature is None:
-        return 0.0
-    return (
-        1.7 * abs(signature["white_ratio"] - reference_signature["white_ratio"])
-        + 1.1 * abs(signature["mean_sat"] - reference_signature["mean_sat"])
-        + 0.25 * abs(signature["mean_gray"] - reference_signature["mean_gray"])
-    )
-
-
-def blend_signature(current_signature, new_signature):
-    if current_signature is None:
-        return new_signature
-    if new_signature is None:
-        return current_signature
-    return {
-        key: (1.0 - SIGNATURE_BLEND) * current_signature[key]
-        + SIGNATURE_BLEND * new_signature[key]
-        for key in current_signature
-    }
-
-
-def apply_stabilized_candidate(result, candidate, burst_mode, keep_raw_line=False):
-    result["burst_track_mode"] = burst_mode
-    if burst_mode == "raw":
-        result["tracking_mode"] = result.get(
-            "raw_tracking_mode",
-            result.get("tracking_mode", "detect"),
-        )
-    else:
-        result["tracking_mode"] = burst_mode
-
-    if candidate is None:
-        result["ball_found"] = False
-        result["line_found"] = False
-        result["angle"] = None
-        result["line_source"] = "burst_none"
-        for key in ("cx", "cy", "radius"):
-            if key in result:
-                del result[key]
-        return
-
-    result["ball_found"] = True
-    result["cx"] = int(round(candidate[0]))
-    result["cy"] = int(round(candidate[1]))
-    result["radius"] = int(round(candidate[2]))
-
-    if keep_raw_line and result.get("raw_line_found", False):
-        result["line_found"] = True
-        result["angle"] = result.get("raw_angle")
-        result["line_source"] = result.get("raw_line_source", "n/a")
-    else:
-        result["line_found"] = False
-        result["angle"] = None
-        result["line_source"] = "burst_none"
-
-
-def recompute_rotation_metrics(metrics, fps):
+def recompute_path_metrics(metrics):
     results = metrics.get("per_frame_results", [])
-    valid_angles = []
-    valid_indices = []
 
-    for index, result in enumerate(results):
-        if (
-            result.get("ball_found")
-            and result.get("line_found")
-            and result.get("angle") is not None
-        ):
-            valid_angles.append(result["angle"])
-            valid_indices.append(index)
+    moving_centers = []
+    moving_radii = []
+    for result in results:
+        if result.get("ball_found"):
+            moving_centers.append((float(result["cx"]), float(result["cy"])))
+            moving_radii.append(float(result["radius"]))
 
     total = len(results)
-    valid = len(valid_angles)
+    tracked = len(moving_centers)
+    avg_r = float(sum(moving_radii) / max(len(moving_radii), 1))
 
-    if valid < 2:
-        metrics["rotation_rate_deg_s"] = 0.0
-        metrics["wobble_detected"] = False
-        metrics["wobble_magnitude_deg"] = 0.0
-        metrics["detection_rate"] = valid / max(total, 1)
-        metrics["valid_frames"] = valid
-        metrics["total_frames"] = total
+    metrics["tracking_quality_pct"] = round(tracked / max(total, 1) * 100, 1)
+    metrics["avg_radius_px"] = round(avg_r, 1)
+    metrics["valid_frames"] = tracked
+    metrics["total_frames"] = total
+
+    if tracked < 3:
+        metrics.setdefault("path_drift_deg", 0.0)
+        metrics.setdefault("rms_lateral_px", 0.0)
+        metrics.setdefault("max_lateral_px", 0.0)
+        metrics.setdefault("total_path_px", 0.0)
+        metrics.setdefault("direction_wobble_deg", 0.0)
+        metrics.setdefault("lateral_deviations_px", [])
+        metrics.setdefault("forward_positions_px", [])
         return metrics
 
-    dt = 1.0 / max(float(fps), 0.001)
-    rotation_rates = []
+    # Guard: if ball barely moved, fitLine is meaningless.
+    xs = [c[0] for c in moving_centers]
+    ys = [c[1] for c in moving_centers]
+    span = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    if span < avg_r * 0.5:
+        print("warning: ball moved only {:.1f} px — path metrics unreliable".format(span))
+        metrics["path_drift_deg"] = 0.0
+        metrics["rms_lateral_px"] = 0.0
+        metrics["max_lateral_px"] = 0.0
+        metrics["total_path_px"] = round(span, 1)
+        metrics["direction_wobble_deg"] = 0.0
+        metrics["lateral_deviations_px"] = []
+        metrics["forward_positions_px"] = []
+        return metrics
 
-    for index in range(1, valid):
-        gap = valid_indices[index] - valid_indices[index - 1]
-        actual_dt = gap * dt
-        delta = valid_angles[index] - valid_angles[index - 1]
+    pts = np.array(moving_centers, dtype=np.float32)
+    line_fit = cv2.fitLine(pts.reshape(-1, 1, 2), cv2.DIST_L2, 0, 0.01, 0.01).reshape(-1)
+    vx, vy, x0, y0 = [float(v) for v in line_fit]
 
-        if delta > math.pi / 2:
-            delta -= math.pi
-        if delta < -math.pi / 2:
-            delta += math.pi
+    if vy < 0:
+        vx, vy = -vx, -vy
 
-        rotation_rates.append(delta / actual_dt)
+    metrics["path_drift_deg"] = round(math.degrees(math.atan2(vx, vy)), 2)
 
-    avg_rad = sum(rotation_rates) / len(rotation_rates) if rotation_rates else 0.0
-    avg_deg = math.degrees(avg_rad)
+    perp_x, perp_y = -vy, vx
+    lateral = [(c[0] - x0) * perp_x + (c[1] - y0) * perp_y for c in moving_centers]
+    forward = [(c[0] - x0) * vx + (c[1] - y0) * vy for c in moving_centers]
+    fwd_offset = forward[0]
+    forward = [p - fwd_offset for p in forward]
 
-    if len(rotation_rates) >= 2:
-        variance = (
-            sum((rate - avg_rad) ** 2 for rate in rotation_rates)
-            / len(rotation_rates)
+    rms_lat = math.sqrt(sum(d * d for d in lateral) / tracked)
+    metrics["rms_lateral_px"] = round(rms_lat, 1)
+    metrics["max_lateral_px"] = round(max(abs(d) for d in lateral), 1)
+    metrics["total_path_px"] = round(sum(
+        math.hypot(moving_centers[i][0] - moving_centers[i-1][0],
+                   moving_centers[i][1] - moving_centers[i-1][1])
+        for i in range(1, tracked)
+    ), 1)
+    metrics["lateral_deviations_px"] = [round(d, 1) for d in lateral]
+    metrics["forward_positions_px"] = [round(p, 1) for p in forward]
+
+    path_drift_deg = metrics["path_drift_deg"]
+    min_forward_px = avg_r * 0.25
+    frame_angles = []
+    for i in range(1, tracked):
+        dx = moving_centers[i][0] - moving_centers[i - 1][0]
+        dy = moving_centers[i][1] - moving_centers[i - 1][1]
+        forward = dx * vx + dy * vy
+        if forward > min_forward_px:
+            frame_angles.append(math.degrees(math.atan2(dx, dy)))
+    if len(frame_angles) >= 2:
+        residuals = [a - path_drift_deg for a in frame_angles]
+        metrics["direction_wobble_deg"] = round(
+            math.sqrt(sum(r * r for r in residuals) / len(residuals)), 2
         )
-        wobble_deg = math.degrees(math.sqrt(variance))
     else:
-        wobble_deg = 0.0
+        metrics["direction_wobble_deg"] = 0.0
 
-    metrics["rotation_rate_deg_s"] = round(avg_deg, 1)
-    metrics["wobble_detected"] = wobble_deg > 5.0
-    metrics["wobble_magnitude_deg"] = round(wobble_deg, 1)
-    metrics["detection_rate"] = round(valid / max(total, 1), 2)
-    metrics["valid_frames"] = valid
-    metrics["total_frames"] = total
     return metrics
 
 
-def stabilize_burst_tracking(metrics, frames, manifest, fps):
-    results = metrics.get("per_frame_results", [])
-    if not results:
-      return metrics
-
-    snapshot_raw_results(results)
-
-    pre_frame_count = int(manifest.get("pre_frame_count", 0) or 0)
-    anchor_candidate = choose_anchor_candidate(results, pre_frame_count)
-    if anchor_candidate is None:
-        return recompute_rotation_metrics(metrics, fps)
-
-    anchor_signature = build_anchor_signature(frames, anchor_candidate, pre_frame_count)
-    stable_signature = anchor_signature
-
-    stable_prev = anchor_candidate
-    stable_prev2 = None
-    release_candidates = []
-    released = False
-    hold_frames = 0
-
-    for index, result in enumerate(results):
-        raw_candidate = result_candidate(result, raw=True)
-        raw_signature = (
-            compute_ball_signature(frames[index], raw_candidate)
-            if raw_candidate is not None
-            else None
-        )
-        radius_ok_to_anchor = (
-            candidate_radius_change(raw_candidate, anchor_candidate)
-            <= MAX_RADIUS_CHANGE_RATIO
-        )
-
-        if not released:
-            if raw_candidate is not None and radius_ok_to_anchor:
-                move_from_anchor = candidate_step_diameters(raw_candidate, anchor_candidate)
-                if move_from_anchor >= RELEASE_MIN_STEP_DIAMETERS:
-                    if not release_candidates:
-                        release_candidates = [raw_candidate]
-                    else:
-                        release_step = candidate_step_diameters(
-                            raw_candidate,
-                            release_candidates[-1],
-                        )
-                        if release_step <= MAX_TRACK_STEP_DIAMETERS:
-                            release_candidates.append(raw_candidate)
-                        else:
-                            release_candidates = [raw_candidate]
-                else:
-                    release_candidates = []
-            else:
-                release_candidates = []
-
-            can_release_now = index >= (
-                max(pre_frame_count, 0) + POST_TRIGGER_ANCHOR_HOLD_FRAMES - 1
-            )
-            if (
-                can_release_now
-                and raw_candidate is not None
-                and len(release_candidates) >= RELEASE_CONFIRM_FRAMES
-                and signature_distance(raw_signature, stable_signature)
-                <= MAX_SIGNATURE_DISTANCE
-            ):
-                released = True
-                stable_prev2 = stable_prev
-                stable_prev = raw_candidate
-                stable_signature = blend_signature(stable_signature, raw_signature)
-                hold_frames = 0
-                apply_stabilized_candidate(result, raw_candidate, "raw", keep_raw_line=True)
-            else:
-                apply_stabilized_candidate(
-                    result,
-                    anchor_candidate,
-                    "burst_anchor",
-                    keep_raw_line=False,
-                )
-            continue
-
-        accept_raw = False
-        if raw_candidate is not None:
-            radius_ok = (
-                candidate_radius_change(raw_candidate, stable_prev)
-                <= MAX_RADIUS_CHANGE_RATIO
-            )
-            step_ok = (
-                candidate_step_diameters(raw_candidate, stable_prev)
-                <= MAX_TRACK_STEP_DIAMETERS
-            )
-            predicted = predicted_candidate(stable_prev, stable_prev2)
-            prediction_ok = (
-                predicted is not None
-                and candidate_step_diameters(raw_candidate, predicted)
-                <= MAX_PREDICTION_ERROR_DIAMETERS
-            )
-            signature_ok = (
-                signature_distance(raw_signature, stable_signature)
-                <= MAX_SIGNATURE_DISTANCE
-            )
-            accept_raw = radius_ok and signature_ok and (step_ok or prediction_ok)
-
-        if accept_raw:
-            stable_prev2 = stable_prev
-            stable_prev = raw_candidate
-            stable_signature = blend_signature(stable_signature, raw_signature)
-            hold_frames = 0
-            apply_stabilized_candidate(result, raw_candidate, "raw", keep_raw_line=True)
-            continue
-
-        if stable_prev is not None and hold_frames < MAX_HOLD_FRAMES:
-            hold_frames += 1
-            apply_stabilized_candidate(result, stable_prev, "burst_hold", keep_raw_line=False)
-        else:
-            apply_stabilized_candidate(result, None, "burst_lost", keep_raw_line=False)
-
-    metrics["burst_anchor"] = {
-        "cx": int(round(anchor_candidate[0])),
-        "cy": int(round(anchor_candidate[1])),
-        "radius": int(round(anchor_candidate[2])),
-    }
-    return recompute_rotation_metrics(metrics, fps)
 
 
 def attach_velocity_metrics(metrics, manifest, fps):
@@ -1074,42 +639,32 @@ def attach_velocity_metrics(metrics, manifest, fps):
 
 def print_velocity_results(metrics):
     print("  velocity frames:   {}".format(metrics.get("velocity_valid_frames", 0)))
-    print(
-        "  avg velocity:      {:.2f} mph ({:.2f} ball/s)".format(
-            metrics.get("avg_velocity_mph", 0.0),
-            metrics.get("avg_velocity_ball_diam_s", 0.0),
-        ),
-    )
-    print(
-        "  peak velocity:     {:.2f} mph ({:.2f} ball/s)".format(
-            metrics.get("peak_velocity_mph", 0.0),
-            metrics.get("peak_velocity_ball_diam_s", 0.0),
-        ),
-    )
-    print(
-        "  roll distance:     {:.2f} in ({:.2f} ball diameters)".format(
-            metrics.get("total_roll_distance_in", 0.0),
-            metrics.get("total_roll_distance_ball_diam", 0.0),
-        ),
-    )
+    print("  avg velocity:      {:.2f} mph ({:.2f} ball/s)".format(
+        metrics.get("avg_velocity_mph", 0.0),
+        metrics.get("avg_velocity_ball_diam_s", 0.0),
+    ))
+    print("  peak velocity:     {:.2f} mph ({:.2f} ball/s)".format(
+        metrics.get("peak_velocity_mph", 0.0),
+        metrics.get("peak_velocity_ball_diam_s", 0.0),
+    ))
+    print("  roll distance:     {:.2f} in ({:.2f} ball diameters)".format(
+        metrics.get("total_roll_distance_in", 0.0),
+        metrics.get("total_roll_distance_ball_diam", 0.0),
+    ))
     print("")
 
 
 def build_review_panel(result, metrics, index, total, manifest):
     debug = result["debug_frame"].copy()
-    burst_mode = result.get("burst_track_mode", "raw")
-    raw_mode = result.get("raw_tracking_mode", result.get("tracking_mode", "detect"))
+    track_mode = result.get("tracking_mode", "detect")
+    status = "ball tracked" if result.get("ball_found") else "no detection"
 
-    status = (
-        "ball+line"
-        if result["ball_found"] and result["line_found"]
-        else "ball only"
-        if result["ball_found"]
-        else "no detection"
-    )
-    angle_text = "angle n/a"
-    if result["angle"] is not None:
-        angle_text = "angle {:.1f} deg".format(math.degrees(result["angle"]))
+    drift = metrics.get("path_drift_deg", 0.0)
+    rms = metrics.get("rms_lateral_px", 0.0)
+    avg_r = metrics.get("avg_radius_px", 1.0)
+    wobble = metrics.get("direction_wobble_deg", 0.0)
+    drift_dir = "R" if drift > 0 else "L"
+    drift_abs = abs(drift)
 
     cv2.putText(
         debug,
@@ -1120,53 +675,8 @@ def build_review_panel(result, metrics, index, total, manifest):
         (0, 255, 255),
         2,
     )
-    cv2.putText(
-        debug,
-        "{} | burst {} | raw {}".format(status, burst_mode, raw_mode),
-        (12, debug.shape[0] - 34),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        (255, 255, 0),
-        2,
-    )
-    if result.get("raw_ball_found"):
-        raw_cx = int(result["raw_cx"])
-        raw_cy = int(result["raw_cy"])
-        raw_radius = int(result["raw_radius"])
-        raw_matches_final = (
-            result.get("ball_found")
-            and raw_cx == int(result["cx"])
-            and raw_cy == int(result["cy"])
-            and raw_radius == int(result["radius"])
-        )
-        if not raw_matches_final:
-            cv2.circle(debug, (raw_cx, raw_cy), raw_radius, (0, 0, 255), 1)
-            cv2.putText(
-                debug,
-                "raw",
-                (raw_cx + raw_radius + 4, raw_cy - 6),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                (0, 0, 255),
-                1,
-            )
-    cv2.putText(
-        debug,
-        angle_text,
-        (12, debug.shape[0] - 12),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        (255, 255, 0),
-        2,
-    )
     if result.get("ball_found"):
-        cv2.circle(
-            debug,
-            (int(result["cx"]), int(result["cy"])),
-            int(result["radius"]),
-            (255, 255, 0),
-            2,
-        )
+        cv2.circle(debug, (int(result["cx"]), int(result["cy"])), int(result["radius"]), (255, 255, 0), 2)
         cv2.circle(debug, (int(result["cx"]), int(result["cy"])), 2, (255, 255, 0), -1)
         cv2.putText(
             debug,
@@ -1177,48 +687,49 @@ def build_review_panel(result, metrics, index, total, manifest):
             (255, 255, 255),
             2,
         )
-    if result.get("velocity_mph") is not None:
-        cv2.putText(
-            debug,
-            "speed {:.2f} mph | {:.2f} ball/s".format(
-                result["velocity_mph"],
-                result["velocity_ball_diam_s"],
-            ),
-            (12, 80),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (0, 255, 255),
-            2,
-        )
+    drift_color = (0, 220, 0) if drift_abs < 2.0 else (0, 165, 255) if drift_abs < 5.0 else (0, 80, 255)
     cv2.putText(
         debug,
-        "rotation {:.1f} deg/s".format(metrics.get("rotation_rate_deg_s", 0.0)),
+        "path drift {:.2f}deg {}".format(drift_abs, drift_dir),
+        (12, 80),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        drift_color,
+        2,
+    )
+    cv2.putText(
+        debug,
+        "RMS lateral {:.3f} diam".format(rms / max(avg_r * 2, 1)),
         (12, 104),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
         (0, 200, 255),
         2,
     )
+    wobble_color = (0, 220, 0) if wobble < 2.0 else (0, 165, 255) if wobble < 5.0 else (0, 80, 255)
     cv2.putText(
         debug,
-        "wobble {} | {:.1f} deg".format(
-            "YES" if metrics.get("wobble_detected") else "NO",
-            metrics.get("wobble_magnitude_deg", 0.0),
-        ),
+        "dir wobble {:.2f}deg".format(wobble),
         (12, 128),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
-        (0, 200, 255),
+        wobble_color,
         2,
-    )
-
-    footer = "left/right or p/n to step | space next | q quit | capture {} frames @ {:.1f} fps".format(
-        manifest.get("frame_count", total),
-        estimate_fps(manifest),
     )
     cv2.putText(
         debug,
-        footer,
+        "{} | {}".format(status, track_mode),
+        (12, debug.shape[0] - 34),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (255, 255, 0),
+        2,
+    )
+    cv2.putText(
+        debug,
+        "left/right or p/n to step | space next | q quit | {} frames @ {:.1f} fps".format(
+            manifest.get("frame_count", total), estimate_fps(manifest)
+        ),
         (12, debug.shape[0] - 14),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
@@ -1259,14 +770,14 @@ def review_capture(frames, metrics, manifest):
     cv2.destroyWindow(WINDOW_NAME)
 
 
-def ble_thread_main():
+def _ble_thread_main():
     global _ble_loop
     _ble_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_ble_loop)
     try:
-        _ble_loop.run_until_complete(ble_setup())
-    except Exception as exc:
-        print("BLE setup error: {}".format(exc))
+        _ble_loop.run_until_complete(_ble_setup())
+    except Exception as e:
+        print("BLE setup error: {}".format(e))
         _ble_ready.set()
         return
     _ble_ready.set()
@@ -1311,7 +822,7 @@ def handle_ble_write(characteristic, value, **kwargs):
         _launch_capture_worker(text)
 
 
-async def ble_setup():
+async def _ble_setup():
     global _ble_server
     _ble_server = BlessServer(name=BLE_DEVICE_NAME, loop=_ble_loop)
     _ble_server.read_request_func = lambda char, **kwargs: char.value
@@ -1333,43 +844,60 @@ async def ble_setup():
         None,
         GATTAttributePermissions.writeable,
     )
+    await _ble_server.add_new_characteristic(
+        BALL_DATA_SERVICE_UUID,
+        TIMESERIES_CHAR_UUID,
+        GATTCharacteristicProperties.read | GATTCharacteristicProperties.notify,
+        None,
+        GATTAttributePermissions.readable,
+    )
     await _ble_server.start()
     print("BLE: advertising as '{}'".format(BLE_DEVICE_NAME))
 
 
-def start_ble_server():
+def _start_ble_server():
     if not _ble_available:
-        print("warning: bless not installed - BLE disabled")
+        print("warning: bless not installed — BLE disabled")
         print("  run: pip3 install bless")
         return
-    thread = threading.Thread(target=ble_thread_main, daemon=True)
-    thread.start()
+    t = threading.Thread(target=_ble_thread_main, daemon=True)
+    t.start()
     if not _ble_ready.wait(timeout=10):
         print("warning: BLE server did not start in time")
 
 
-def pack_metrics(metrics):
+def _pack_metrics(metrics):
+    # 39 bytes: 8×float32 + uint8 + uint16 + float32  (little-endian)
+    #  0- 3  float32  path_drift_deg
+    #  4- 7  float32  rms_lateral_px
+    #  8-11  float32  direction_wobble_deg
+    # 12-15  float32  total_path_px
+    # 16-19  float32  avg_radius_px
+    # 20-31  float32×3  reserved (0.0)
+    # 32     uint8    tracking_quality_pct
+    # 33-34  uint16   frame_count
+    # 35-38  float32  fps
     return struct.pack(
         "<8fBHf",
-        float(metrics.get("avg_velocity_mph", 0.0)),
-        float(metrics.get("peak_velocity_mph", 0.0)),
-        float(metrics.get("avg_velocity_ball_diam_s", 0.0)),
-        float(metrics.get("peak_velocity_ball_diam_s", 0.0)),
-        float(metrics.get("rotation_rate_deg_s", 0.0)),
-        float(metrics.get("wobble_magnitude_deg", 0.0)),
-        float(metrics.get("total_roll_distance_in", 0.0)),
-        float(metrics.get("total_roll_distance_ball_diam", 0.0)),
-        int(bool(metrics.get("wobble_detected", False))),
+        float(metrics.get("path_drift_deg", 0.0)),
+        float(metrics.get("rms_lateral_px", 0.0)),
+        float(metrics.get("direction_wobble_deg", 0.0)),
+        float(metrics.get("total_path_px", 0.0)),
+        float(metrics.get("avg_radius_px", 0.0)),
+        0.0,
+        0.0,
+        0.0,
+        int(metrics.get("tracking_quality_pct", 0)),
         int(metrics.get("total_frames", 0)),
         float(metrics.get("fps", 0.0)),
     )
 
 
-async def async_notify(data):
+async def _async_notify(data):
     if _ble_server is None:
         return
-    characteristic = _ble_server.get_characteristic(BALL_DATA_CHAR_UUID)
-    if characteristic is None:
+    char = _ble_server.get_characteristic(BALL_DATA_CHAR_UUID)
+    if char is None:
         print("BLE: characteristic not found")
         return
     print("BLE: preparing to notify {} byte payload".format(len(data)))
@@ -1377,11 +905,8 @@ async def async_notify(data):
 
     delivered = False
     for attempt in range(1, BLE_NOTIFY_RETRY_COUNT + 1):
-        characteristic.value = bytearray(data)
-        notified = _ble_server.update_value(
-            BALL_DATA_SERVICE_UUID,
-            BALL_DATA_CHAR_UUID,
-        )
+        char.value = bytearray(data)
+        notified = _ble_server.update_value(BALL_DATA_SERVICE_UUID, BALL_DATA_CHAR_UUID)
         print(
             "BLE: notify attempt {}/{} -> {}".format(
                 attempt,
@@ -1397,15 +922,14 @@ async def async_notify(data):
         print("BLE: no iPad subscribed - data not delivered")
 
 
-def notify_frontend(metrics):
+def _notify_ipad(metrics):
     if not _ble_available or _ble_server is None or _ble_loop is None:
-        print("BLE not available - skipping frontend notification")
+        print("BLE not available — skipping iPad notification")
         return
-    data = pack_metrics(metrics)
+    data = _pack_metrics(metrics)
     try:
         asyncio.run_coroutine_threadsafe(
-            async_notify(data),
-            _ble_loop,
+            _async_notify(data), _ble_loop
         ).result(timeout=5)
         print(
             "BLE: notify sequence finished ({} bytes, {} attempts)".format(
@@ -1417,14 +941,86 @@ def notify_frontend(metrics):
         print("warning: BLE notification failed: {}".format(exc))
 
 
+def _pack_timeseries(metrics):
+    """
+    Pack per-frame lateral deviation and forward position into a compact BLE payload.
+    Layout (little-endian):
+      0     uint8    N  (sample count, up to 40)
+      1     float32  fps
+      5     N×int16  lateral_deviation_px × 100  (precision 0.01 px, range ±327 px)
+      5+2N  N×int16  forward_position_px × 10    (precision 0.1 px, range ±3276 px)
+    Total: 5 + 4N bytes (max 165 bytes for N=40)
+    """
+    lateral = metrics.get("lateral_deviations_px", [])
+    forward = metrics.get("forward_positions_px", [])
+    fps = float(metrics.get("fps", 13.0))
+
+    N = min(len(lateral), len(forward), 40)
+    if N == 0:
+        return struct.pack("<Bf", 0, fps)
+
+    lat_enc = [max(-32767, min(32767, int(round(v * 100)))) for v in lateral[:N]]
+    fwd_enc = [max(-32767, min(32767, int(round(v * 10)))) for v in forward[:N]]
+
+    fmt = "<Bf{}h{}h".format(N, N)
+    return struct.pack(fmt, N, fps, *lat_enc, *fwd_enc)
+
+
+async def _async_notify_timeseries(data):
+    if _ble_server is None:
+        return
+    char = _ble_server.get_characteristic(TIMESERIES_CHAR_UUID)
+    if char is None:
+        print("BLE: time-series characteristic not found")
+        return
+    await asyncio.sleep(BLE_NOTIFY_INITIAL_DELAY_S)
+
+    delivered = False
+    for attempt in range(1, BLE_NOTIFY_RETRY_COUNT + 1):
+        char.value = bytearray(data)
+        notified = _ble_server.update_value(BALL_DATA_SERVICE_UUID, TIMESERIES_CHAR_UUID)
+        print(
+            "BLE: time-series attempt {}/{} -> {}".format(
+                attempt,
+                BLE_NOTIFY_RETRY_COUNT,
+                notified,
+            ),
+        )
+        delivered = delivered or bool(notified)
+        if attempt < BLE_NOTIFY_RETRY_COUNT:
+            await asyncio.sleep(BLE_NOTIFY_RETRY_DELAY_S)
+
+    if not delivered:
+        print("BLE: no iPad subscribed - time series not delivered")
+
+
+def _notify_timeseries(metrics):
+    if not _ble_available or _ble_server is None or _ble_loop is None:
+        return
+    data = _pack_timeseries(metrics)
+    try:
+        asyncio.run_coroutine_threadsafe(
+            _async_notify_timeseries(data), _ble_loop
+        ).result(timeout=5)
+        print(
+            "BLE: time-series sequence finished ({} bytes, {} frames, {} attempts)".format(
+                len(data),
+                data[0] if data else 0,
+                BLE_NOTIFY_RETRY_COUNT,
+            ),
+        )
+    except Exception as exc:
+        print("warning: BLE time series failed: {}".format(exc))
+
+
+
+
 def run_capture_once(calibrate=False):
     print("")
     print("triggering burst capture...")
     trigger_response = trigger_burst()
     if not trigger_response.get("accepted", True):
-        raise RuntimeError(
-            "burst trigger was not accepted: {}".format(trigger_response),
-        )
+        raise RuntimeError("burst trigger was not accepted: {}".format(trigger_response))
 
     wait_for_ready()
     manifest = fetch_json(MANIFEST_URL)
@@ -1443,36 +1039,33 @@ def run_capture_once(calibrate=False):
             return
         print("calibration saved; run a normal capture to test it")
         return
-
     loaded_settings = load_detector_settings()
     if loaded_settings is not None:
         print("using detector calibration from {}".format(CALIBRATION_PATH.name))
     else:
         print("warning: no detector calibration file found, using built-in defaults")
-
     frames = download_frames(manifest)
     metrics = analyze_putt(frames, fps)
-    stabilize_burst_tracking(metrics, frames, manifest, fps)
-    attach_velocity_metrics(metrics, manifest, fps)
+    recompute_path_metrics(metrics)
     metrics["fps"] = fps
     print_results(metrics)
-    print_velocity_results(metrics)
+    _notify_ipad(metrics)
+    _notify_timeseries(metrics)
 
-    notify_frontend(metrics)
     review_capture(frames, metrics, manifest)
 
 
 def main():
     loaded_settings = load_detector_settings()
-    start_ble_server()
+    _start_ble_server()
     print("=" * 50)
-    print("  OV5640 Burst Analyzer  (frontend BLE)")
+    print("  OV5640 Burst Analyzer  (iPad BLE)")
     print("=" * 50)
     print("")
     print("  target:      {}".format(BASE_URL))
     print("  BLE name:    {}".format(BLE_DEVICE_NAME))
-    print("  make sure this computer is connected to Wi-Fi OV5640-Burst")
-    print("  open the Flutter app Home screen to auto-connect to '{}'".format(BLE_DEVICE_NAME))
+    print("  make sure the laptop is connected to Wi-Fi OV5640-Burst")
+    print("  open Nathan's app — it will auto-connect to '{}'".format(BLE_DEVICE_NAME))
     if loaded_settings is not None:
         print("  detector calibration loaded from {}".format(CALIBRATION_PATH.name))
     print("")
@@ -1482,7 +1075,7 @@ def main():
         print("device online - state={}".format(status.get("state", "unknown")))
     except Exception as exc:
         raise RuntimeError(
-            "could not reach burst camera at {} - connect to OV5640-Burst first".format(BASE_URL),
+            "could not reach burst camera at {} - connect to OV5640-Burst first".format(BASE_URL)
         ) from exc
 
     while True:
