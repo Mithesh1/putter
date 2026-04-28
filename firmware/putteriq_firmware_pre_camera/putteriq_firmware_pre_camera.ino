@@ -1636,9 +1636,6 @@ static void printAbortWindowData() {
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
-  while (!Serial) {
-    delay(10);
-  }
 
   analogReadResolution(12);
   pinMode(PIN_READY_BUTTON, INPUT_PULLUP);
