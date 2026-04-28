@@ -69,6 +69,7 @@ static const uint8_t MESSAGE_TYPE_CAMERA = 0x02;
 
 static const uint8_t COMMAND_ATTACH_SESSION = 0x01;
 static const uint8_t COMMAND_CLEAR_SESSION = 0x02;
+static const uint8_t COMMAND_LATENCY_PING = 0x03;
 
 static const uint8_t IMU_ENCODING_INT16_SCALED = 1;
 static const uint8_t PIEZO_ENCODING_INT16_RAW = 1;
@@ -1113,6 +1114,25 @@ static void sendPuttStateOverBle(PuttState state) {
   notifyCharacteristic->notify();
 }
 
+static void sendLatencyPingOverBle(uint32_t pingId) {
+  if (!bleClientConnected || notifyCharacteristic == nullptr) {
+    return;
+  }
+
+  const int len = snprintf((char *)rawPacketBuffer,
+                           sizeof(rawPacketBuffer),
+                           "PING:%lu",
+                           (unsigned long)pingId);
+  if (len <= 0) {
+    return;
+  }
+
+  const size_t payloadLength =
+      min((size_t)len, sizeof(rawPacketBuffer) - 1U);
+  notifyCharacteristic->setValue(rawPacketBuffer, payloadLength);
+  notifyCharacteristic->notify();
+}
+
 static void transitionToState(PuttState nextState) {
   if (putt.state == nextState) {
     return;
@@ -1146,6 +1166,14 @@ static void handleBleCommand(const uint8_t *data, size_t length) {
       bleSessionBound = false;
       activeBleSessionId = millis() == 0 ? 1 : millis();
       Serial.println("Cleared BLE session binding");
+      break;
+
+    case COMMAND_LATENCY_PING:
+      if (length < 5) {
+        Serial.println("Ignoring short latency ping command");
+        return;
+      }
+      sendLatencyPingOverBle(readUint32LE(data, 1));
       break;
 
     default:

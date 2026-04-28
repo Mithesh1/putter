@@ -5,6 +5,7 @@ import 'package:designcode/data/local_database.dart' as db;
 import 'package:designcode/models/stroke_packet.dart';
 import 'package:designcode/packet_codec.dart';
 import 'package:designcode/services/app_controller.dart';
+import 'package:designcode/services/ball_data_service.dart';
 import 'package:designcode/services/ble_service.dart';
 import 'package:designcode/services/ble_transport.dart';
 import 'package:designcode/services/processing.dart';
@@ -32,6 +33,20 @@ class _PutterAppState extends State<PutterApp> {
   late final SessionRepository _repository;
   late final AppController _controller;
   late final Future<void> _initialization;
+  StreamSubscription<BleConnectionState>? _ballDataStateSubscription;
+
+  void _syncBallDataService(BleConnectionState state) {
+    switch (state) {
+      case BleConnectionState.scanning:
+      case BleConnectionState.connecting:
+        unawaited(BallDataService.instance.stop());
+        break;
+      case BleConnectionState.connected:
+      case BleConnectionState.disconnected:
+        BallDataService.instance.start();
+        break;
+    }
+  }
 
   @override
   void initState() {
@@ -43,12 +58,21 @@ class _PutterAppState extends State<PutterApp> {
       syncService: DisabledSyncService(),
       realTransport: BleService(),
     );
-    _initialization = _controller.initialize();
+    _initialization = _controller.initialize().then((_) {
+      _syncBallDataService(_controller.connectionState);
+      _ballDataStateSubscription = _controller.watchConnectionState().listen((
+        state,
+      ) {
+        _syncBallDataService(state);
+      });
+    });
   }
 
   @override
   void dispose() {
+    unawaited(_ballDataStateSubscription?.cancel());
     unawaited(_controller.dispose());
+    unawaited(BallDataService.instance.dispose());
     unawaited(_database.close());
     super.dispose();
   }
@@ -155,85 +179,185 @@ class DashboardPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<StoredStroke?>(
-      stream: controller.watchLatestStroke(),
-      builder: (context, latestSnapshot) {
-        final latestStroke = latestSnapshot.data;
-        return StreamBuilder<PracticeSession?>(
-          stream: controller.watchActiveSession(),
-          builder: (context, sessionSnapshot) {
-            final activeSession = sessionSnapshot.data;
-            return StreamBuilder<BleConnectionState>(
-              stream: controller.watchConnectionState(),
-              initialData: controller.connectionState,
-              builder: (context, connectionSnapshot) {
-                return StreamBuilder<String>(
-                  stream: controller.watchSyncStatus(),
-                  initialData: 'Cloud sync disabled',
-                  builder: (context, syncSnapshot) {
-                    return StreamBuilder<String>(
-                      stream: controller.watchLivePuttState(),
-                      initialData: controller.livePuttState,
-                      builder: (context, liveStateSnapshot) {
-                        return StreamBuilder<String>(
-                          stream: controller.watchBleLatency(),
-                          initialData: controller.bleLatencyLabel,
-                          builder: (context, latencySnapshot) {
+    return StreamBuilder<BallData>(
+      stream: BallDataService.instance.stream,
+      initialData: BallDataService.instance.latestBallData,
+      builder: (context, ballSnapshot) {
+        final ballData = ballSnapshot.data;
+        return StreamBuilder<List<BallData>>(
+          stream: BallDataService.instance.historyStream,
+          initialData: BallDataService.instance.recentHistory,
+          builder: (context, ballHistorySnapshot) {
+            final ballHistory = ballHistorySnapshot.data ?? const <BallData>[];
+            return StreamBuilder<String>(
+              stream: BallDataService.instance.debugStream,
+              initialData: BallDataService.instance.latestDebugMessage,
+              builder: (context, ballDebugSnapshot) {
+                final ballDebug =
+                    ballDebugSnapshot.data ??
+                    BallDataService.instance.latestDebugMessage;
+                return StreamBuilder<StoredStroke?>(
+                  stream: controller.watchLatestStroke(),
+                  builder: (context, latestSnapshot) {
+                    final latestStroke = latestSnapshot.data;
+                    return StreamBuilder<PracticeSession?>(
+                      stream: controller.watchActiveSession(),
+                      builder: (context, sessionSnapshot) {
+                        final activeSession = sessionSnapshot.data;
+                        return StreamBuilder<BleConnectionState>(
+                          stream: controller.watchConnectionState(),
+                          initialData: controller.connectionState,
+                          builder: (context, connectionSnapshot) {
                             return StreamBuilder<String>(
-                              stream: controller.watchImpactToBleLatency(),
-                              initialData: controller.impactToBleLatencyLabel,
-                              builder: (context, impactToBleSnapshot) {
-                                return SafeArea(
-                                  child: SingleChildScrollView(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      16,
-                                      16,
-                                      16,
-                                      24,
-                                    ),
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        const HeaderSection(),
-                                        const SizedBox(height: 20),
-                                        LiveStatusCard(
-                                          connectionState:
-                                              connectionSnapshot.data ??
-                                              controller.connectionState,
-                                          transportName: controller.transportName,
-                                          activeSession: activeSession,
-                                          syncStatus: syncSnapshot.data ??
-                                              'Cloud sync disabled',
-                                          puttState: liveStateSnapshot.data ??
-                                              controller.livePuttState,
-                                          bleLatencyLabel: latencySnapshot.data ??
-                                              controller.bleLatencyLabel,
-                                          impactToBleLatencyLabel:
-                                              impactToBleSnapshot.data ??
-                                              controller.impactToBleLatencyLabel,
-                                        ),
-                                        const SizedBox(height: 24),
-                                        _StrokeSnapshotSection(
-                                          title: 'Last Putt Snapshot',
-                                          stroke: latestStroke,
-                                          emptySubtitle: 'Waiting for stroke',
-                                        ),
-                                        const SizedBox(height: 24),
-                                        const SectionTitle(
-                                          title: 'Session Summary',
-                                        ),
-                                        const SizedBox(height: 12),
-                                        SummaryCard(
-                                          activeSession: activeSession,
-                                          latestStroke: latestStroke,
-                                        ),
-                                        const SizedBox(height: 24),
-                                        const SectionTitle(title: 'Coach Notes'),
-                                        const SizedBox(height: 12),
-                                        CoachNotesCard(latestStroke: latestStroke),
-                                      ],
-                                    ),
-                                  ),
+                              stream: controller.watchSyncStatus(),
+                              initialData: 'Cloud sync disabled',
+                              builder: (context, syncSnapshot) {
+                                return StreamBuilder<String>(
+                                  stream: controller.watchLivePuttState(),
+                                  initialData: controller.livePuttState,
+                                  builder: (context, liveStateSnapshot) {
+                                    return StreamBuilder<String>(
+                                      stream: controller.watchBleLatency(),
+                                      initialData: controller.bleLatencyLabel,
+                                      builder: (context, latencySnapshot) {
+                                        return StreamBuilder<String>(
+                                          stream: controller.watchImpactToBleLatency(),
+                                          initialData: controller.impactToBleLatencyLabel,
+                                          builder: (context, impactToBleSnapshot) {
+                                            return SafeArea(
+                                              child: SingleChildScrollView(
+                                                padding: const EdgeInsets.fromLTRB(
+                                                  16,
+                                                  16,
+                                                  16,
+                                                  24,
+                                                ),
+                                                child: Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    const HeaderSection(),
+                                                    const SizedBox(height: 20),
+                                                    LiveStatusCard(
+                                                      connectionState:
+                                                          connectionSnapshot.data ??
+                                                          controller.connectionState,
+                                                      transportName:
+                                                          controller.transportName,
+                                                      activeSession: activeSession,
+                                                      syncStatus: syncSnapshot.data ??
+                                                          'Cloud sync disabled',
+                                                      puttState:
+                                                          liveStateSnapshot.data ??
+                                                          controller.livePuttState,
+                                                      bleLatencyLabel:
+                                                          latencySnapshot.data ??
+                                                          controller.bleLatencyLabel,
+                                                      impactToBleLatencyLabel:
+                                                          impactToBleSnapshot.data ??
+                                                          controller
+                                                              .impactToBleLatencyLabel,
+                                                    ),
+                                                    const SizedBox(height: 16),
+                                                    BallDebugCard(message: ballDebug),
+                                                    const SizedBox(height: 24),
+                                                _StrokeSnapshotSection(
+                                                  title: 'Last Putt Snapshot',
+                                                  stroke: latestStroke,
+                                                  emptySubtitle:
+                                                      'Waiting for stroke',
+                                                ),
+                                                    const SizedBox(height: 24),
+                                                    const SectionTitle(
+                                                      title: 'Ball Motion',
+                                                    ),
+                                                    const SizedBox(height: 12),
+                                                    GridView.count(
+                                                      crossAxisCount: 2,
+                                                      shrinkWrap: true,
+                                                      physics: const NeverScrollableScrollPhysics(),
+                                                      mainAxisSpacing: 12,
+                                                      crossAxisSpacing: 12,
+                                                      childAspectRatio: 0.94,
+                                                      children: [
+                                                        BallMetricTrendCard(
+                                                          title: 'Ball Speed',
+                                                          value: ballData == null
+                                                              ? 'No data'
+                                                              : '${ballData.avgVelocityMph.toStringAsFixed(1)} mph',
+                                                          subtitle: ballData == null
+                                                              ? 'Waiting for burst'
+                                                              : 'Peak ${ballData.peakVelocityMph.toStringAsFixed(1)} mph',
+                                                          icon: Icons.speed,
+                                                          chart: ballHistory.isEmpty
+                                                              ? null
+                                                              : _ballHistoryChart(
+                                                                  points: _ballHistoryPoints(
+                                                                    ballHistory,
+                                                                    (data) => data.avgVelocityMph,
+                                                                  ),
+                                                                  label: 'Ball Speed',
+                                                                  color: const Color(0xFF00897B),
+                                                                  unitLabel: 'mph',
+                                                                  referenceValue: 0,
+                                                                ),
+                                                        ),
+                                                        BallMetricTrendCard(
+                                                          title: 'Spin',
+                                                          value: ballData == null
+                                                              ? 'No data'
+                                                              : '${ballData.rotationRateDegS.toStringAsFixed(0)} deg/s',
+                                                          subtitle: ballData == null
+                                                              ? 'Waiting for burst'
+                                                              : 'Wobble ${ballData.wobbleMagnitudeDeg.toStringAsFixed(1)}°',
+                                                          icon: Icons.sync,
+                                                          chart: ballHistory.isEmpty
+                                                              ? null
+                                                              : _ballHistoryChart(
+                                                                  points: _ballHistoryPoints(
+                                                                    ballHistory,
+                                                                    (data) => data.rotationRateDegS,
+                                                                  ),
+                                                                  label: 'Spin',
+                                                                  color: const Color(0xFF6A1B9A),
+                                                                  unitLabel: 'dps',
+                                                                  referenceValue: 0,
+                                                                ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                    const SizedBox(height: 24),
+                                                    const SectionTitle(
+                                                      title: 'Ball Roll Analysis',
+                                                    ),
+                                                    const SizedBox(height: 12),
+                                                    BallRollCard(ballData: ballData),
+                                                    const SizedBox(height: 24),
+                                                    const SectionTitle(
+                                                      title: 'Session Summary',
+                                                    ),
+                                                    const SizedBox(height: 12),
+                                                    SummaryCard(
+                                                      activeSession: activeSession,
+                                                      latestStroke: latestStroke,
+                                                    ),
+                                                    const SizedBox(height: 24),
+                                                    const SectionTitle(
+                                                      title: 'Coach Notes',
+                                                    ),
+                                                    const SizedBox(height: 12),
+                                                    CoachNotesCard(
+                                                      latestStroke: latestStroke,
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            );
+                                          },
+                                        );
+                                      },
+                                    );
+                                  },
                                 );
                               },
                             );
@@ -792,6 +916,18 @@ class MetricCardData {
   });
 }
 
+class CompactMetricCardData {
+  final String title;
+  final String value;
+  final String subtitle;
+
+  const CompactMetricCardData({
+    required this.title,
+    required this.value,
+    required this.subtitle,
+  });
+}
+
 class MetricCard extends StatelessWidget {
   const MetricCard({super.key, required this.data});
 
@@ -838,6 +974,56 @@ class MetricCard extends StatelessWidget {
             _MiniChartLegend(data: data.chart!),
           ] else
             const Spacer(),
+        ],
+      ),
+    );
+  }
+}
+
+class CompactMetricCard extends StatelessWidget {
+  const CompactMetricCard({super.key, required this.data});
+
+  final CompactMetricCardData data;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x12000000),
+            blurRadius: 10,
+            offset: Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            data.title,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: Colors.grey.shade700,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            data.value,
+            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 1),
+          Text(
+            data.subtitle,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+          ),
         ],
       ),
     );
@@ -1457,7 +1643,8 @@ class _StrokeSnapshotSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final metrics = _buildStrokeMetricCards(stroke);
+    final summaryMetrics = _buildCompactStrokeMetricCards(stroke);
+    final graphMetrics = _buildStrokeMetricCards(stroke);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1478,19 +1665,34 @@ class _StrokeSnapshotSection extends StatelessWidget {
             title: 'No stroke selected',
             subtitle: emptySubtitle,
           )
-        else
+        else ...[
           GridView.builder(
-            itemCount: metrics.length,
+            itemCount: summaryMetrics.length,
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              mainAxisSpacing: 8,
+              crossAxisSpacing: 10,
+              childAspectRatio: 4.8,
+            ),
+            itemBuilder: (context, index) =>
+                CompactMetricCard(data: summaryMetrics[index]),
+          ),
+          const SizedBox(height: 12),
+          GridView.builder(
+            itemCount: graphMetrics.length,
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 2,
               mainAxisSpacing: 12,
               crossAxisSpacing: 12,
-              childAspectRatio: 1.18,
+              childAspectRatio: 0.94,
             ),
-            itemBuilder: (context, index) => MetricCard(data: metrics[index]),
+            itemBuilder: (context, index) => MetricCard(data: graphMetrics[index]),
           ),
+        ],
       ],
     );
   }
@@ -1722,6 +1924,180 @@ class EmptyStateCard extends StatelessWidget {
   }
 }
 
+class BallDebugCard extends StatelessWidget {
+  const BallDebugCard({super.key, required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF3F8F4),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFCAE3CF)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Ball Data Debug',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 6),
+          Text(message, style: const TextStyle(fontSize: 13)),
+        ],
+      ),
+    );
+  }
+}
+
+class BallRollCard extends StatelessWidget {
+  const BallRollCard({super.key, required this.ballData});
+
+  final BallData? ballData;
+
+  @override
+  Widget build(BuildContext context) {
+    if (ballData == null) {
+      return const EmptyStateCard(
+        title: 'No ball data yet',
+        subtitle: 'Run a burst capture to see roll analysis here.',
+      );
+    }
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x12000000),
+            blurRadius: 14,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.circle_outlined, color: Color(0xFF1B5E20)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '${ballData!.avgVelocityMph.toStringAsFixed(2)} mph avg'
+                  '  •  ${ballData!.peakVelocityMph.toStringAsFixed(2)} mph peak',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _MetricWrap(
+            values: [
+              'Roll ${ballData!.totalRollDistanceIn.toStringAsFixed(2)} in',
+              '${ballData!.totalRollDistanceBallDiam.toStringAsFixed(2)} ball diam',
+              'Spin ${ballData!.rotationRateDegS.toStringAsFixed(1)} deg/s',
+              'Wobble: ${ballData!.wobbleDetected ? "YES  ${ballData!.wobbleMagnitudeDeg.toStringAsFixed(1)}°" : "NO"}',
+              '${ballData!.frameCount} frames @ ${ballData!.fps.toStringAsFixed(1)} fps',
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Received ${_formatClockTime(ballData!.receivedAt)}',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class BallMetricTrendCard extends StatelessWidget {
+  const BallMetricTrendCard({
+    super.key,
+    required this.title,
+    required this.value,
+    required this.subtitle,
+    required this.icon,
+    required this.chart,
+  });
+
+  final String title;
+  final String value;
+  final String subtitle;
+  final IconData icon;
+  final MiniChartData? chart;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 240,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x12000000),
+            blurRadius: 14,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 24, color: const Color(0xFF1B5E20)),
+          const SizedBox(height: 8),
+          Text(
+            title,
+            style: TextStyle(fontSize: 14, color: Colors.grey.shade700),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            subtitle,
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+          ),
+          const SizedBox(height: 10),
+          Expanded(
+            child: chart == null
+                ? Container(
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF1F5F3),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Text(
+                      'Waiting for ball data',
+                      style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                    ),
+                  )
+                : MiniMetricChart(data: chart!),
+          ),
+          if (chart != null) ...[
+            const SizedBox(height: 6),
+            _MiniChartLegend(data: chart!),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 class SectionTitle extends StatelessWidget {
   const SectionTitle({super.key, required this.title});
 
@@ -1741,6 +2117,53 @@ class ChartPoint {
   final double value;
 
   const ChartPoint({required this.ms, required this.value});
+}
+
+List<ChartPoint> _ballHistoryPoints(
+  List<BallData> history,
+  double Function(BallData data) selector,
+) {
+  if (history.isEmpty) {
+    return const <ChartPoint>[];
+  }
+  final first = history.first.receivedAt;
+  return List<ChartPoint>.unmodifiable(
+    history.map((data) {
+      final ms = data.receivedAt.difference(first).inMilliseconds.toDouble();
+      return ChartPoint(ms: ms, value: selector(data));
+    }),
+  );
+}
+
+MiniChartData _ballHistoryChart({
+  required List<ChartPoint> points,
+  required String label,
+  required Color color,
+  required String unitLabel,
+  required double referenceValue,
+}) {
+  final lastMs = points.isEmpty ? 0.0 : points.last.ms;
+  return MiniChartData(
+    series: [
+      MiniChartSeries(
+        label: label,
+        color: color,
+        points: points,
+      ),
+    ],
+    impactMs: lastMs,
+    referenceValue: referenceValue,
+    minX: 0,
+    maxX: math.max(lastMs, 1),
+    unitLabel: unitLabel,
+    markers: [
+      MiniChartMarker(
+        label: 'Latest',
+        ms: lastMs,
+        color: const Color(0xFFEF6C00),
+      ),
+    ],
+  );
 }
 
 class _LatestPuttSeries {
@@ -1911,9 +2334,56 @@ String _timedMarkerLabel(String label, int offsetMs) {
   return '$label ${offsetMs}ms';
 }
 
-List<MetricCardData> _buildStrokeMetricCards(StoredStroke? stroke) {
-  final latestPuttSeries = stroke == null ? null : _buildLatestPuttSeries(stroke);
+List<CompactMetricCardData> _buildCompactStrokeMetricCards(StoredStroke? stroke) {
   final strokeMetrics = stroke?.metrics;
+  return [
+    CompactMetricCardData(
+      title: 'Tempo Ratio',
+      value: strokeMetrics == null
+          ? 'No data'
+          : '${strokeMetrics.tempoRatio.toStringAsFixed(2)}:1',
+      subtitle: 'Backstroke to forward stroke',
+    ),
+    CompactMetricCardData(
+      title: 'Backstroke Duration',
+      value: strokeMetrics == null
+          ? 'No data'
+          : _formatDurationMs(strokeMetrics.backstrokeDurationMs),
+      subtitle: 'Backstroke start to forward start',
+    ),
+    CompactMetricCardData(
+      title: 'Forward Duration',
+      value: strokeMetrics == null
+          ? 'No data'
+          : _formatDurationMs(strokeMetrics.forwardStrokeDurationMs),
+      subtitle: 'Forward start to impact',
+    ),
+    CompactMetricCardData(
+      title: 'Total Stroke Duration',
+      value: strokeMetrics == null
+          ? 'No data'
+          : _formatDurationMs(strokeMetrics.totalStrokeDurationMs),
+      subtitle: 'Backstroke start to follow-through end',
+    ),
+    CompactMetricCardData(
+      title: 'Peak Stroke Angular Velocity',
+      value: strokeMetrics == null
+          ? 'No data'
+          : strokeMetrics.peakAngularVelocityLabel,
+      subtitle: 'Peak gyro Y rotation rate',
+    ),
+    CompactMetricCardData(
+      title: 'Impact Location',
+      value: strokeMetrics?.impact ?? 'No data',
+      subtitle: 'Heel, center, or toe',
+    ),
+  ];
+}
+
+List<MetricCardData> _buildStrokeMetricCards(
+  StoredStroke? stroke,
+) {
+  final latestPuttSeries = stroke == null ? null : _buildLatestPuttSeries(stroke);
 
   return [
     MetricCardData(
@@ -1948,48 +2418,8 @@ List<MetricCardData> _buildStrokeMetricCards(StoredStroke? stroke) {
             ),
     ),
     MetricCardData(
-      title: 'Tempo Ratio',
-      value: strokeMetrics == null
-          ? 'No data'
-          : '${strokeMetrics.tempoRatio.toStringAsFixed(2)}:1',
-      subtitle: 'Backstroke to forward stroke',
-      icon: Icons.timelapse,
-    ),
-    MetricCardData(
-      title: 'Backstroke Duration',
-      value: strokeMetrics == null
-          ? 'No data'
-          : _formatDurationMs(strokeMetrics.backstrokeDurationMs),
-      subtitle: 'Backstroke start to forward start',
-      icon: Icons.arrow_back,
-    ),
-    MetricCardData(
-      title: 'Forward Duration',
-      value: strokeMetrics == null
-          ? 'No data'
-          : _formatDurationMs(strokeMetrics.forwardStrokeDurationMs),
-      subtitle: 'Forward start to impact',
-      icon: Icons.arrow_forward,
-    ),
-    MetricCardData(
-      title: 'Total Stroke Duration',
-      value: strokeMetrics == null
-          ? 'No data'
-          : _formatDurationMs(strokeMetrics.totalStrokeDurationMs),
-      subtitle: 'Backstroke start to follow-through end',
-      icon: Icons.schedule,
-    ),
-    MetricCardData(
-      title: 'Peak Stroke Angular Velocity',
-      value: strokeMetrics == null
-          ? 'No data'
-          : strokeMetrics.peakAngularVelocityLabel,
-      subtitle: 'Peak gyro Y rotation rate',
-      icon: Icons.speed,
-    ),
-    MetricCardData(
       title: 'Stroke Speed',
-      value: strokeMetrics == null ? 'No data' : strokeMetrics.speedLabel,
+      value: stroke == null ? 'No data' : stroke.metrics.speedLabel,
       subtitle: 'Impact speed along main putt axis',
       icon: Icons.sports_score,
       chart: latestPuttSeries == null
@@ -2103,18 +2533,6 @@ List<MetricCardData> _buildStrokeMetricCards(StoredStroke? stroke) {
               unitLabel: 'dps',
               markers: _gyroPhaseMarkers(latestPuttSeries),
             ),
-    ),
-    MetricCardData(
-      title: 'Impact',
-      value: strokeMetrics?.impact ?? 'No data',
-      subtitle: 'Contact location',
-      icon: Icons.center_focus_strong,
-    ),
-    MetricCardData(
-      title: 'Ball Roll',
-      value: strokeMetrics?.rollStatus ?? 'Unavailable',
-      subtitle: 'Camera data not in v1',
-      icon: Icons.circle_outlined,
     ),
     MetricCardData(
       title: 'Yaw',
@@ -2845,4 +3263,10 @@ String _formatDurationMs(int ms) {
     return '${(ms / 1000.0).toStringAsFixed(2)}s';
   }
   return '${ms}ms';
+}
+
+String _formatClockTime(DateTime dt) {
+  return '${dt.hour.toString().padLeft(2, '0')}:'
+      '${dt.minute.toString().padLeft(2, '0')}:'
+      '${dt.second.toString().padLeft(2, '0')}';
 }
