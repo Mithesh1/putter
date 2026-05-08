@@ -3,31 +3,32 @@
 
 **Author:** Kyle Smith  
 **Course:** ECE 445, Spring 2026  
-**Notebook type:** Digital Markdown lab notebook maintained in project repository  
-**Project focus areas:** camera subsystem, ball-roll analysis, integration architecture, app support, and system debugging
+**Notebook type:** Digital Markdown lab notebook  
+**Primary technical areas:** camera subsystem, ball-motion analysis, esp32S3 firmware, frontend integration, and system debugging
 
 ---
 
 ## Project Summary
 
-The project goal is a sensor-integrated smart putter that measures both putter motion and ball behavior. My primary contributions were in the camera subsystem and its analysis pipeline:
+The project goal is a sensor integrated smart putter that measures both putter motion and ball behavior. My main technical work centered on the camera subsystem and the software around it:
 
-- selecting and validating the OV5640-based camera approach
-- building the ESP32-S3 burst-capture firmware
-- designing and revising the Python ball-analysis pipeline
-- integrating the camera workflow into a desktop Flutter front end
-- debugging system-level issues involving WiFi, BLE, PSRAM, and frontend/backend architecture
+- selecting and validating the OV5640 based camera approach
+- bringing up the esp32S3 camera hardware on a breadboarded prototype
+- building burst capture firmware on the ESP32S3
+- designing and revising the Python ballanalysis code
+- integrating camera controls and analysis results into a desktop frontend
+- debugging system-level issues involving WiFi, BLE, PSRAM, lighting stability, and host/app architecture
 
-I also contributed to proposal/design documentation, subsystem requirements, verification planning, and integration planning between firmware, Python tooling, and app displays.
+I also contributed to proposal and design documentation, subsystem requirements, verification planning, demo preparation, and integration planning between firmware, analysis code, and the app.
 
 ---
 
-## Main Proposal Ideas Carried Forward
+## Main Ideas Carried Forward from the Proposal
 
-- Use an **ESP32-S3** as the embedded compute platform because it supports PSRAM, camera input, WiFi, and BLE.
-- Use an **OV5640 camera** to capture the initial portion of ball motion after impact.
-- Use an **IMU + piezo** to characterize putter motion and trigger the camera capture sequence.
-- Use a **mobile/frontend app** to display processed results in a usable form for the golfer.
+- Use an **esp32S3** because it supports camera input, PSRAM, WiFi, and BLE.
+- Use an **OV5640 camera** to capture early ball motion after impact.
+- Use an **IMU + piezo** to characterize putter motion and create a trigger event.
+- Present processed results in an app or frontend rather than only in serial logs.
 - Focus on actionable ball metrics such as:
   - average velocity
   - maximum velocity
@@ -39,16 +40,14 @@ I also contributed to proposal/design documentation, subsystem requirements, ver
 
 ## References and Source Material
 
-These references informed the subsystem design, algorithm structure, and implementation tradeoffs.
-
 1. OpenCV documentation for `HoughCircles`, `HoughLinesP`, `fitLine`, and Lucas-Kanade optical flow.
-2. PyImageSearch ball tracking tutorials for contour-based and HSV-based tracking structure.
+2. PyImageSearch ball-tracking tutorials for contour-based and HSV-based detection structure.
 3. GitHub repositories reviewed during algorithm design:
    - `ronheywood/opencv`
-   - `aryanjagushte/Ball-Tracking-using-OpenCV-and-ESP32-CAM`
-4. Adafruit OV5640 and ESP32-S3 hardware documentation.
-5. ECE 445 proposal/design document materials produced by the team.
-6. Internal project records:
+   - `aryanjagushte/Ball-Tracking-using-OpenCV-and-esp32CAM`
+4. Adafruit OV5640 and esp32S3 hardware documentation.
+5. ECE 445 proposal/design materials produced by the team.
+6. Internal project records used to reconstruct later integration work:
    - [PROJECT_HISTORY.md](C:/Users/kyles/OneDrive/Documents/Arduino/test/PROJECT_HISTORY.md)
    - [ANALYSIS_CHANGES.md](C:/Users/kyles/OneDrive/Documents/Arduino/test/ANALYSIS_CHANGES.md)
    - [NATHAN_SETUP.md](C:/Users/kyles/OneDrive/Documents/Arduino/test/NATHAN_SETUP.md)
@@ -61,7 +60,7 @@ These references informed the subsystem design, algorithm structure, and impleme
 
 ```mermaid
 flowchart LR
-    A["OV5640 Camera"] --> B["ESP32-S3 Burst Firmware"]
+    A["OV5640 Camera"] --> B["esp32S3 Burst Firmware"]
     B --> C["WiFi HTTP Endpoints"]
     C --> D["Python Acquisition + Analysis"]
     D --> E["Frontend / App Display"]
@@ -77,7 +76,7 @@ flowchart LR
 \mathrm{fps} = \frac{N - 1}{(t_{last} - t_{first}) / 1000}
 \]
 
-where `N` is frame count and timestamps are recorded in firmware using `millis()`.
+where `N` is the number of captured frames and timestamps are recorded in firmware using `millis()`.
 
 **Eq. 2 - Best-fit path drift angle**
 
@@ -85,7 +84,7 @@ where `N` is frame count and timestamps are recorded in firmware using `millis()
 \theta_{drift} = \mathrm{atan2}(v_x, v_y)
 \]
 
-where `(v_x, v_y)` is the direction vector from `cv2.fitLine`.
+where `(v_x, v_y)` is the direction vector returned by `cv2.fitLine`.
 
 **Eq. 3 - RMS lateral deviation**
 
@@ -93,7 +92,7 @@ where `(v_x, v_y)` is the direction vector from `cv2.fitLine`.
 \mathrm{RMS}_{lat} = \sqrt{\frac{1}{N}\sum_{i=1}^{N} d_i^2}
 \]
 
-where `d_i` is the perpendicular distance of each tracked ball center from the best-fit path.
+where `d_i` is the perpendicular distance from each tracked ball center to the best-fit path.
 
 **Eq. 4 - Direction wobble**
 
@@ -101,204 +100,460 @@ where `d_i` is the perpendicular distance of each tracked ball center from the b
 \theta_{wobble} = \sqrt{\frac{1}{N}\sum_{i=1}^{N} (\theta_i - \theta_{drift})^2}
 \]
 
-where `\theta_i` is the angle of each meaningful frame-to-frame displacement.
+where `\theta_i` is the angle of each meaningful frame to frame displacement.
 
 ---
 
-## Chronological Entries
+## Dated Entries
 
-### Entry 1 - 2026-02-09 to 2026-02-22
-**Objective:** Form project direction, define subsystem responsibilities, and establish measurable goals.
+### 2026-02-09
+**Course milestone:** Proposal due.
 
-**Work completed**
-- Formed the team with Nathan Hwang and Mithesh Ballae.
-- Participated in selecting the smart putter concept.
-- Helped define subsystem boundaries and high-level system goals.
-- Co-authored the proposal and contributed camera-related subsystem requirements.
-- Defined ball-behavior sensing goals around frame rate, rotational sensing, and wobble detection.
-- Defined mounting-related goals around weight and fit.
+**Objective:** Finalize the project concept and define the camera related part of the proposal.
 
-**Design decisions**
-- Chose a camera-assisted approach rather than relying on only IMU-derived inference because ball behavior after impact is not fully observable from club sensors alone.
-- Chose to treat the camera subsystem as an independent design problem with its own verification path.
+**Record**
+- Worked with Nathan Hwang and Mithesh Ballae to settle on the smart putter concept.
+- Helped define the smart putter subsystem boundaries and what the camera needed to measure.
+- Co-authored the proposal and wrote down the initial camera related performance goals.
 
-**Results**
-- Proposal completed.
-- Requirements for the ball-behavior subsystem established early enough to drive hardware and algorithm choices.
+**Results / decisions**
+- Established early that the ball behavior subsystem needed direct observation of the golf ball after impact, not only club side sensing.
 
 ---
 
-### Entry 2 - 2026-02-23 to 2026-03-08
-**Objective:** Convert proposal ideas into a concrete design document and evaluate camera/algorithm options.
+### 2026-02-17
+**Objective:** Start ordering the non PCB project parts and continue code side research while hardware was still unavailable.
 
-**Work completed**
-- Co-authored the design document.
-- Researched ESP32-S3 + OV5640 compatibility and bandwidth limits.
-- Compared candidate ball-tracking approaches:
-  - seam/equator tracking
-  - logo/dimple tracking
-  - center tracking with geometric post-processing
-- Evaluated whether a compact embedded camera system could practically meet the frame-rate target.
+**Record**
+- Team parts order placed on 2/17.
+- Since no physical parts had arrived yet, my work remained focused on code research, algorithm structure, and subsystem planning.
+- Continued reading OpenCV references and reviewing open source ball tracking examples.
 
-**Testing / analysis**
-- Reviewed open-source implementations and OpenCV APIs to estimate algorithm complexity and likely robustness.
-- Compared algorithm complexity against expected embedded constraints.
-
-**Design decisions**
-- Selected OV5640 for image quality and ESP32-S3 compatibility.
-- Initially selected seam/equator-based rotation analysis because it appeared more directly tied to roll quality.
-- Logged concern that seam-based methods might be sensitive to lighting, contrast, and ball appearance.
-
-**Results**
-- Full design document completed.
-- Camera hardware and algorithm direction selected.
+**Results / decisions**
+- Confirmed that the early project period would be software/research heavy until parts arrived.
 
 ---
 
-### Entry 3 - 2026-03-09 to 2026-03-22
-**Objective:** Set up the embedded development environment and write down the first complete analysis plan.
+### 2026-02-20
+**Objective:** Narrow the first pass camera and analysis approach while still waiting on hardware.
 
-**Work completed**
-- Installed and configured Arduino IDE and ESP32 board support.
-- Established working board settings for ESP32-S3 with OPI PSRAM and USB CDC.
-- Uploaded initial test programs and verified basic board functionality.
-- Wrote structured pseudocode for the ball-analysis pipeline.
+**Record**
+- Compared seam/equator tracking against logo/dimple tracking and center tracking.
+- Chose seam/equator tracking as the first method because it mapped most directly to roll and rotation.
+- Noted that seam based detection would probably be sensitive to lighting and visible markings on the ball.
 
-**Recorded algorithm plan**
-- Per-frame:
-  - white/HSV masking
-  - morphology
-  - circle/contour validation
-  - ROI extraction
-  - line detection
-- Multi-frame:
-  - angle differencing
-  - roll rate computation
-  - wobble computation
-
-**Results**
-- Development environment working.
-- First coherent end-to-end vision pipeline documented.
+**Results / decisions**
+- Had a workable first pass algorithm direction for the design document.
 
 ---
 
-### Entry 4 - 2026-03-23 to 2026-04-05
-**Objective:** Bring up the camera hardware and verify stable image capture on the ESP32-S3.
+### 2026-02-23
+**Course milestone:** Design document due.
 
-**Work completed**
-- Soldered and wired the Adafruit OV5640 breakout to the ESP32-S3 DevKitC-1.
-- Completed the full breadboard camera wiring.
-- Wrote and uploaded camera initialization sketches.
-- Verified JPEG frame capture at QVGA/VGA-class settings.
-- Built the first WiFi streaming and image-serving firmware.
+**Objective:** Finish the design document with enough technical detail to support later implementation.
+
+**Record**
+- authored the design document w mithesh.
+- Wrote down the OV5640 + esp32S3 hardware direction and the initial camera side software approach.
+- Used the research done while waiting for parts to justify the early analysis method.
+
+**Results / decisions**
+- Locked in OV5640 + esp32S3 as the camera direction.
+
+---
+
+### 2026-02-27
+**Objective:** Prepare the camera subsystem explanation for design review.
+
+**Record**
+- Reorganized the camera logic into a cleaner step-by-step explanation.
+- Wrote down what had to happen per frame and what had to happen across frames for roll analysis.
+
+**Results / decisions**
+- Produced a more defensible design-review narrative for the camera subsystem.
+
+---
+
+### 2026-03-02
+**Course milestone:** Design review week.
+
+**Objective:** Present the camera subsystem as a real engineering plan rather than just an idea.
+
+**Record**
+- Used the prior research and algorithm description to support the design review.
+- Explained the intended data flow from image capture to analysis output.
+
+**Results / decisions**
+- Camera work had a coherent technical basis going into implementation.
+
+---
+
+### 2026-03-09
+**Course milestone:** Breadboard demo period.
+
+**Objective:** Record what actually happened during the breadboard demo period and avoid overstating camera progress.
+
+**Record**
+- The breadboard demo at this point was Nathan's IMU work on a different MCU, not my camera breadboarding.
+- I still had no camera parts in hand, so my work remained focused on backend algorithms, software structure, and planning.
+- Used the time to continue thinking through how the analysis would eventually consume captured frames.
+
+**Results / decisions**
+- Important correction to the project record: there was no meaningful camera breadboarding yet because parts had still not arrived.
+
+---
+
+### 2026-03-23
+**Objective:** Record the PCB ordering milestone and the fact that camera hardware work still had not started.
+
+**Record**
+- PCB related order placed on 3/23.
+- Hardware still had not arrived, so I remained in the research/software phase.
+- Continued documenting the analysis side assumptions and reviewing what would need to be validated once the camera could actually be powered.
+
+**Results / decisions**
+- Up through this point, my camera work was still almost entirely code side and design side.
+
+---
+
+### 2026-03-30
+**Course milestone:** Individual progress report period.
+
+**Objective:** Start actual camera hardware work now that physical parts were finally available.
+
+**Record**
+- First actual project parts arrived on 3/30.
+- Shifted from mostly research to actual breadboarded camera development.
+- Began preparing the OV5640 breakout and esp32S3 DevKitC-1 for bring-up.
+
+**Results / decisions**
+- This date marks the real start of hands on camera prototyping.
+
+---
+
+### 2026-04-01
+**Objective:** Start breadboarding the camera system and verify the physical wiring path.
+
+**Record**
+- Soldered header pins onto the Adafruit OV5640 breakout.
+- Wired the camera to the esp32S3 DevKitC-1 on the breadboard.
+- Started writing and uploading camera initialization sketches.
+
+**Results / decisions**
+- Completed the first serious hardware setup for the camera subsystem.
+
+---
+
+### 2026-04-03
+**Objective:** Verify that the breadboarded camera could produce usable output.
+
+**Record**
+- Confirmed JPEG capture at QVGA/VGA class settings.
+- Started using WiFi based image serving to inspect the output more directly.
+- Began shaping that work into `test.ino`, which became the live camera sketch I used before burst capture existed.
 
 **Testing / debugging**
-- Diagnosed image quality issues, especially purple tint and corruption at higher XCLK values.
-- Determined the sensor required practical tuning of XCLK and startup behavior.
-- Added settle-frame discard so auto-exposure and white balance could stabilize before use.
+- Observed unstable color and frame quality behavior under some settings.
 
-**Design decisions**
-- Moved to WiFi-based desktop viewing and testing instead of trying to inspect image quality purely through serial or file dumps.
-- Chose ESP32 SoftAP mode for early bench testing because it removed dependency on external network credentials.
-
-**Results**
-- Camera brought up successfully on breadboard.
-- Stable JPEG serving confirmed.
+**Results / decisions**
+- Confirmed that the camera basically worked, but image stability and lighting behavior still needed tuning.
 
 ---
 
-### Entry 5 - 2026-04-06 to 2026-04-19
-**Objective:** Implement the first usable computer-vision analysis tool and attempt PCB camera integration.
+### 2026-04-05
+**Objective:** Turn the first camera bring up into a repeatable live stream setup.
 
-**Work completed**
-- Built `ball_analyzer.py` as the first full analysis application.
-- Added:
-  - live preview
-  - trigger-based capture
-  - HSV calibration
-  - debug playback
-  - velocity / rotation / wobble calculations
-- Installed Python dependencies and set up local analysis workflow.
-- Tested the WiFi stream end-to-end with the analyzer.
+**Record**
+- Expanded `test.ino` into a direct WiFi stream sketch so I could view live frames in the browser.
+- Used that sketch to expose the camera as `OV5640-Direct` and keep testing simple while I was still focused on backend work.
+- Kept the sketch lightweight so I could change camera settings quickly and immediately see the result.
 
-**PCB integration attempt**
-- Tried to move the camera path from breadboard to the fabricated PCB.
-- Updated pin mappings for the PCB wiring.
-- Ran I2C scans and power checks.
-- Investigated DVDD / jumper / FFC mismatch issues.
+**Results / decisions**
+- `test.ino` became the main sketch I used before `test_burst.ino`.
+
+---
+
+### 2026-04-06
+**Course milestone:** Progress demo week.
+
+**Objective:** Handle non camera project hardware while continuing to separate working demo paths from blocked ones.
+
+**Record**
+- Ordered the putter head on 4/6.
+- Continued comparing the breadboarded camera path against the PCB path and concluded the breadboard setup was still the lower risk demo route.
+
+**Results / decisions**
+- Preserved the breadboard camera path as the path to keep moving quickly.
+
+---
+
+### 2026-04-07
+**Objective:** Use `test.ino` to improve the backend before adding burst storage.
+
+**Record**
+- Fed the live camera output from `test.ino` into my backend work.
+- Used the live stream to keep adjusting detection parameters without also having to solve burst timing and transfer issues.
+- Continued comparing my code against the open source ball tracking approaches I had studied earlier.
+
+**Results / decisions**
+- `test.ino` gave me a stable way to work on backend detection and parameter tuning before `test_burst.ino` existed.
+
+---
+
+### 2026-04-08
+**Objective:** Check whether the fabricated PCB could realistically host the camera path.
+
+**Record**
+- Tried adapting the camera path to the PCB pinout.
+- Ran I2C scans and voltage checks.
+- Compared the expected camera wiring against the actual board/module combination.
 
 **Testing / debugging**
 - Verified PWDN and RST levels.
-- Observed I2C failure and traced the issue beyond simple firmware configuration.
-- Determined the Seeed camera module and PCB FFC implementation were not practically compatible for the demo schedule.
+- Still observed I2C failure.
 
-**Design decisions**
-- Abandoned PCB camera integration for the demo path.
-- Kept the camera subsystem on the breadboard using the Adafruit breakout.
-
-**Results**
-- Analysis script working in desktop form.
-- PCB camera path documented as failed due to hardware mismatch, not left ambiguous.
+**Results / decisions**
+- The PCB camera route was not a near term substitute for the breadboarded camera setup.
 
 ---
 
-### Entry 6 - 2026-04-20 to 2026-04-25
-**Objective:** Transition from live stream viewing to burst capture with timestamped frames suitable for quantitative analysis.
+### 2026-04-09
+**Objective:** Keep improving image quality in `test.ino` so the backend results would actually mean something.
 
-**Work completed**
-- Designed and implemented `test_burst.ino`.
-- Added:
-  - PSRAM-backed burst storage
-  - pre-trigger rolling buffer
-  - post-trigger capture window
-  - `/trigger`, `/status`, `/manifest`, `/frame`, `/clear` endpoints
-- Stored each frame with a firmware-side timestamp to avoid timing errors caused by irregular WiFi transfer.
+**Record**
+- Adjusted `test.ino` settings such as XCLK, JPEG quality, frame size assumptions, frame buffer count, and settle frame count.
+- Used the live stream to judge whether lighting and color shifts were causing bad detections in the backend.
+
+**Results / decisions**
+- Learned that backend quality depended directly on camera tuning, not just Python logic.
+
+---
+
+### 2026-04-10
+**Objective:** Decide whether to keep investing time in PCB camera integration.
+
+**Record**
+- Reviewed the failed PCB camera bring up and what would still need to be proven.
+- Investigated the Seeed module, FFC connector assumptions, and board level power details.
+
+**Results / decisions**
+- Concluded that the Seeed module and PCB connector implementation were not a practical match for the remaining schedule.
+- Locked in the breadboard camera as the real demo hardware path.
+
+---
+
+### 2026-04-11
+**Objective:** Continue improving the live camera path and the backend together.
+
+**Record**
+- Kept using `test.ino` as the camera source while refining my backend code.
+- Adjusted detection thresholds around brightness, saturation, and ball contrast.
+- Used the live stream to improve my version of the ball tracking logic that started from the open source references.
+
+**Results / decisions**
+- The live camera sketch was doing more than bring up hardware. It was the main tool for improving the backend before burst mode existed.
+
+---
+
+### 2026-04-13
+**Objective:** Begin machine shop coordination one week after ordering the putter.
+
+**Record**
+- Met with the machine shop to plan the putter modifications and how the physical assembly should be executed.
+- Reviewed how the enclosure and camera/PCB split would affect the final demo configuration.
+
+**Results / decisions**
+- Started the 3 day machine shop sequence needed to make the physical putter plan real.
+
+---
+
+### 2026-04-14
+**Objective:** Continue machine shop planning and execution for the putter hardware.
+
+**Record**
+- Returned to the machine shop for the second day of work.
+- Continued planning and executing the machining needed for the putter assembly.
+
+**Results / decisions**
+- Physical implementation of the putter plan progressed as intended.
+
+---
+
+### 2026-04-15
+**Objective:** Finish the machine shop sequence and continue camera output debugging.
+
+**Record**
+- Returned to the machine shop for the third consecutive day to finish the planned putter work.
+- Continued testing the breadboarded camera output and dealing with light glitching.
+- This period included repeated adjustment of firmware parameters and physical capacitors on the breadboard to reduce lighting instability.
 
 **Testing / debugging**
-- Verified capture rates using hardware timestamps rather than computer-side timing.
-- Measured successful capture at roughly the required frame rate.
-- Confirmed that pre-trigger frames captured the moment immediately before the trigger.
+- The image below shows the kind of purple tint / lighting glitching I was fighting during camera setup.
 
-**Design decisions**
-- Moved from continuous browser streaming to burst capture because analysis quality depends on deterministic frame sets and accurate timing.
-- Decided that firmware-side timestamps were mandatory for any credible fps-derived metrics.
+**Figure 2 - Early camera output showing severe color and lighting instability**
 
-**Results**
-- `test_burst.ino` became the main camera-firmware foundation.
+![Figure 2 - Early camera output showing severe color and lighting instability](assets/2026-04-15-light-glitch.png)
+
+**Results / decisions**
+- Camera tuning required both software changes and breadboard hardware changes; it was not just a parameter problem.
 
 ---
 
-### Entry 7 - 2026-04-26 to 2026-04-27
-**Objective:** Build a desktop frontend for the camera pipeline and integrate the Python workflow into a usable UI.
+### 2026-04-16
+**Objective:** Keep testing lighting and saturation behavior while using `test.ino` as the camera source.
 
-**Work completed**
-- Built a separate **Camera Lab** flow in the original local Flutter frontend at [frontend](C:/Users/kyles/OneDrive/Documents/Arduino/test/frontend).
-- Added a dedicated camera page:
+**Record**
+- Ran more live camera tests under different room lighting conditions.
+- Kept adjusting the Python detection logic while watching how the live stream changed in real time.
+- Continued using the sketch to improve the backend before I complicated things with burst storage and downloads.
+
+**Results / decisions**
+- Confirmed that `test.ino` was the right intermediate step before moving to burst capture.
+
+---
+
+### 2026-04-17
+**Objective:** Decide what the live stream setup still could and could not tell me.
+
+**Record**
+- Reviewed what I had learned from `test.ino` about detection quality, color stability, and lighting sensitivity.
+- Noted that the live stream setup was good for backend tuning, but not ideal for precise timing or frame by frame measurement.
+
+**Results / decisions**
+- This directly motivated the move toward stored burst capture with timestamps.
+
+---
+
+### 2026-04-18
+**Objective:** Push the camera software toward something that could support actual measurement rather than only visual inspection.
+
+**Record**
+- Continued maturing the host side analysis code.
+- Kept tuning detection behavior under different brightness and saturation conditions while still using `test.ino` as the live camera source.
+- Reached the point where the remaining weak spot was timing and repeatability, not just whether the backend could find the ball.
+
+**Results / decisions**
+- Confirmed that lighting sensitivity was going to be one of the core practical problems for the camera subsystem.
+- Also confirmed that I needed a burst capture design next so I could measure from stored frames instead of only from a live stream.
+
+---
+
+### 2026-04-20
+**Course milestone:** Mock demo week.
+
+**Objective:** Move from ad hoc image viewing to quantitative burst capture suitable for demo use.
+
+**Record**
+- Designed and implemented `test_burst.ino`.
+- Added PSRAM-backed burst storage, a pre trigger rolling buffer, a post trigger capture window, and HTTP endpoints for trigger, status, manifest, frame download, and clear.
+- Stored each frame with a firmware side timestamp.
+
+**Results / decisions**
+- `test_burst.ino` became the main camera firmware for the rest of the project.
+
+---
+
+### 2026-04-21
+**Objective:** Verify that burst timing was trustworthy and not being distorted by host side download timing.
+
+**Record**
+- Checked burst timing using firmware timestamps instead of host side wall clock.
+- Verified that pre trigger storage preserved frames immediately before the trigger event.
+
+**Results / decisions**
+- Firmware side timestamps were required for credible fps derived metrics.
+
+---
+
+### 2026-04-22
+**Objective:** Prepare the physical demo setup around the camera and electronics packaging.
+
+**Record**
+- Ordered and planned the shaft mounted enclosure hardware for the demo configuration.
+- Finalized the practical split between breadboard camera demo hardware and PCB based putter electronics.
+
+**Results / decisions**
+- The demo hardware plan became more realistic and lower-risk.
+
+---
+
+### 2026-04-23
+**Objective:** Improve post capture review so I could actually see what the analysis was doing frame by frame.
+
+**Record**
+- Worked on the review/debug view around captured burst frames.
+- Added or refined overlay logic for tracked ball position and angle reporting.
+
+**Testing / debugging**
+- The screenshot below shows the review window used to inspect tracked frames and validate what the analysis was locking onto.
+
+**Figure 3 - Burst review window with tracked ball overlay**
+
+![Figure 3 - Burst review window with tracked ball overlay](assets/2026-04-23-review-window.png)
+
+**Results / decisions**
+- The review tooling became much more useful for diagnosing bad detections and algorithm mistakes.
+
+---
+
+### 2026-04-24
+**Objective:** Debug burst download reliability and the host side transfer path.
+
+**Record**
+- Hit repeated download failures while pulling burst frames for analysis.
+- Investigated timeouts, incomplete reads, and corrupted JPEG segments during frame download.
+
+**Testing / debugging**
+- The screenshot below captures a representative timeout failure during burst download:
+
+**Figure 4 - Burst download timeout and incomplete-read failure**
+
+![Figure 4 - Burst download timeout and incomplete-read failure](assets/2026-04-24-download-timeout.png)
+
+**Results / decisions**
+- Identified the transfer path as a serious bottleneck and future redesign target.
+
+---
+
+### 2026-04-25
+**Objective:** Build a desktop frontend experience around the camera system so capture, calibration, and review could happen from one place.
+
+**Record**
+- Integrated a dedicated **Camera Lab** flow into the original local Flutter frontend at [frontend](C:/Users/kyles/OneDrive/Documents/Arduino/test/frontend).
+- Added the camera UI page:
   - [camera_lab_page.dart](C:/Users/kyles/OneDrive/Documents/Arduino/test/frontend/lib/camera/camera_lab_page.dart)
-- Added a local bridge layer:
+- Added the bridge layer:
   - [camera_bridge_service_base.dart](C:/Users/kyles/OneDrive/Documents/Arduino/test/frontend/lib/camera/camera_bridge_service_base.dart)
   - [camera_bridge_service_io.dart](C:/Users/kyles/OneDrive/Documents/Arduino/test/frontend/lib/camera/camera_bridge_service_io.dart)
   - [camera_bridge_models.dart](C:/Users/kyles/OneDrive/Documents/Arduino/test/frontend/lib/camera/camera_bridge_models.dart)
-- Added the Python bridge and runtime copies:
+- Added the desktop Python bridge and repo-local runtime copies:
   - [camera_bridge.py](C:/Users/kyles/OneDrive/Documents/Arduino/test/frontend/tool/camera_bridge.py)
   - [burst_analyzer.py](C:/Users/kyles/OneDrive/Documents/Arduino/test/frontend/tool/camera_runtime/burst_analyzer.py)
   - [ball_analyzer.py](C:/Users/kyles/OneDrive/Documents/Arduino/test/frontend/tool/camera_runtime/ball_analyzer.py)
 
+**Windows/frontend setup friction**
+- I also ran into Windows side frontend setup/debugging problems while trying to get the Flutter side usable for this work.
+- The screenshot below is a small example of the environment friction I hit while getting the Windows/frontend side into shape.
+
+**Figure 5 - Windows side Flutter setup friction while building the frontend path**
+
+![Figure 5 - Windows side Flutter setup friction while building the frontend path](assets/2026-04-25-flutter-windows-setup.png)
+
 #### Kyle-style frontend / Camera Lab section
 
-This was the first version of the front end that actually made the camera subsystem feel like a product instead of a set of scripts.
+This was the first frontend version that made the camera work feel like a usable product instead of a collection of scripts.
 
 **What it did**
 - Triggered capture from the UI
 - Opened calibration
 - Ran the Python bridge from the desktop app
 - Displayed processed camera metrics
-- Gave a place to review artifacts and inspect the workflow from one screen
+- Gave a place to inspect artifacts and review the workflow from one screen
 
 **Why it mattered**
 - It removed the "run Python manually, inspect folders manually, and interpret logs manually" workflow.
-- It created a concrete operator-facing interface for the camera subsystem.
-- It demonstrated that the camera-analysis path could be embedded into a front end without moving the actual OpenCV workload onto the ESP32 or the tablet.
+- It created a concrete operator facing interface for the camera subsystem.
+- It proved that the cameraanalysis work could be embedded into a frontend without trying to move the OpenCV work onto the ESP32 or tablet.
 
 **Architecture used**
 - ESP32 served frames over WiFi
@@ -306,153 +561,63 @@ This was the first version of the front end that actually made the camera subsys
 - Flutter desktop launched the bridge and displayed the results
 
 **Important constraint discovered**
-- This Camera Lab flow was fundamentally a **desktop-hosted analysis path**, not a mobile-native path.
-- That later became important when trying to reason about iPad deployment and why the same behavior did not automatically transfer to tablet runtime.
+- This Camera Lab flow was fundamentally a desktop-hosted analysis path, not a mobile-native path.
+- That later mattered when reasoning about iPad deployment and why the same behavior would not automatically transfer to tablet runtime.
 
-**Process note**
-- A substantial amount of this integration and iteration was done with AI-assisted development tools, including Claude/Claude Code and Codex. I still validated the architecture, tested the actual workflow on hardware, and used the tools mainly to accelerate implementation and debugging rather than to replace engineering review.
-
-**Testing / debugging**
-- Verified that the desktop app could launch the Python bridge and reach the ESP32 camera endpoints.
-- Confirmed that calibration and capture controls were functional on the desktop setup.
-- Used this flow to surface later architectural constraints around BLE, Windows support, and iPad deployment.
-
-**Results**
-- Working desktop Camera Lab path established.
+**Results / decisions**
+- By the end of this day I had the version of the camera frontend that I kept referring back to later.
 
 ---
 
-### Entry 8 - 2026-04-27 to 2026-04-28
-**Objective:** Improve correctness of the analysis metrics and prepare the system for handoff/testing on Nathan's hardware.
+### 2026-04-26
+**Objective:** Refine the Camera Lab behavior and keep tuning the camera side analysis, as well as begin migration to ios flutter
 
-**Work completed**
+**Record**
+- Worked through capture, calibration, and review flow from the desktop UI.
+- Tightened the interaction between Flutter desktop, the Python bridge, and the ESP32 endpoints.
+- Continued adjusting detection thresholds for brightness, saturation, and general lighting behavior.
+- Refined data flow so that we were able to send data through MCU after backend results were produced.
+
+**Results / decisions**
+- The camera frontend became much more usable as a real operator tool.
+- We were able to send camera analysis results through bluetooth.
+
+---
+
+### 2026-04-27
+**Objective:** Finish the last round of metric fixes and handoff preparation before the final demo.
+
+**Record**
 - Corrected the wobble computation after identifying a unit error.
-- Reframed the seam-based quality metric as an RMS residual from ideal linear roll progression.
-- Added ROI upsampling and angle-hint-assisted seam re-detection.
-- Migrated Python-side BLE transport from `winrt` to `bless` for Mac compatibility.
-- Wrote setup and handoff instructions for Nathan.
+- Reframed the seam based quality metric as an RMS residual from ideal linear roll progression.
+- Added ROI upsampling and angle hint assisted seam detection.
+- Wrote setup and handoff instructions for Nathan in [NATHAN_SETUP.md](C:/Users/kyles/OneDrive/Documents/Arduino/test/NATHAN_SETUP.md).
+
+**Results / decisions**
+- Metrics became physically meaningful.
+- Handoff documentation existed in a form Nathan could use going into the final demo.
+
+---
+
+### 2026-04-28
+**Course milestone:** Final demo.
+
+**Objective:** Demo the completed camera work and record the final behavior shown that day.
+
+**Record**
+- Demoed the project on 4/28.
+- Used the burst capture firmware, desktop analysis tools, and frontend controls together in the final demonstrated setup.
+- Verified that the camera side could capture a putt, process the saved frames, and report roll quality metrics from that run.
+- The final analysis view emphasized path drift, lateral deviation, and wobble rather than relying only on seam rotation.
 
 **Testing / debugging**
-- Compared the previous wobble formula against the corrected unit-consistent form.
-- Identified that Windows BLE peripheral support was not reliable on the target laptop.
-- Confirmed Mac BLE peripheral support as the practical workaround.
+- The screenshot below shows a representative final result output from the version I had ready by demo day.
 
-**Design decisions**
-- Preserved packet width while changing metric interpretation so that app-side integration stayed manageable.
-- Treated transport support as a system constraint, not just a coding issue.
+**Figure 6 - Path-based analysis results after the metric rewrite**
 
-**Results**
-- Corrected roll-quality interpretation.
-- Nathan handoff path documented in [NATHAN_SETUP.md](C:/Users/kyles/OneDrive/Documents/Arduino/test/NATHAN_SETUP.md).
+![Figure 6 - Path-based analysis results after the metric rewrite](assets/2026-04-28-analysis-results.png)
+
+**Results / decisions**
+- For the final version, path-based roll quality metrics were more useful than the earlier seam-focused measurements.
 
 ---
-
-### Entry 9 - 2026-04-28
-**Objective:** Replace seam-centric roll quality analysis with a more robust ball-path-based analysis.
-
-**Work completed**
-- Rewrote the core analysis approach in `ball_analyzer.py`.
-- Abandoned seam/equator detection as the primary metric source.
-- Switched to center tracking plus best-fit path geometry.
-- Added new metrics:
-  - `path_drift_deg`
-  - `rms_lateral_px`
-  - `direction_wobble_deg`
-  - time-series lateral and forward-position data
-
-**Testing / debugging**
-- Verified that center tracking was more robust than seam visibility across different balls and lighting conditions.
-- Identified that path geometry was more actionable for putter fitting than raw seam rotation rate.
-
-**Design decisions**
-- Prioritized robustness and cross-ball generality over preserving the original seam-tracking concept.
-- Chose to redefine success around measurable path behavior, not around preserving an early algorithm idea.
-
-**Results**
-- Analysis became more reliable and more relevant to the intended coaching use case.
-
----
-
-### Entry 10 - 2026-04-29 to 2026-05-07
-**Objective:** Continue system integration, evaluate combined firmware/app architectures, and reduce bottlenecks in the camera pipeline.
-
-**Work completed**
-- Explored merged firmware paths combining camera, IMU, WiFi, and BLE.
-- Identified BLE-on-Windows and dual-radio complexity as practical integration problems.
-- Built and tested WiFi-only firmware variants to reduce RAM and architectural complexity.
-- Explored the separation of responsibilities between:
-  - camera ESP32
-  - putter ESP32
-  - desktop analysis host
-  - tablet display app
-- Developed `test_burst_2` as a hotspot-client burst variant.
-- Reworked `test_burst_2` into a standalone firmware path rather than a simple wrapper.
-- Added a one-shot bundled burst endpoint (`/burst.bin`) to reduce hotspot transfer overhead caused by 40 separate frame requests.
-
-**Codex-specific work during this phase**
-- Reconstructed and documented project history in [PROJECT_HISTORY.md](C:/Users/kyles/OneDrive/Documents/Arduino/test/PROJECT_HISTORY.md).
-- Built alternate frontend/app paths (`frontend_redo`, `main_kyle_style.dart`, Camera Lab variants) to test architecture options.
-- Debugged Windows Flutter BLE limitations and separated those from the camera workflow.
-- Iterated on firmware structure for:
-  - `final_firmware`
-  - `final_firmware_wifi_only`
-  - `test_burst_2`
-- Diagnosed bottlenecks caused by network topology, per-frame HTTP latency, and mixed BLE/WiFi assumptions.
-
-**Testing / debugging**
-- Verified that PSRAM storage was generally sufficient for the configured burst sizes.
-- Identified network round-trip overhead as the practical hotspot bottleneck.
-- Observed that desktop-hosted Python analysis remained the most realistic path for current demo constraints.
-
-**Design decisions**
-- Treat raw frame transport, analysis, and app display as separate concerns.
-- Prefer sending compact processed results to the app rather than raw frames.
-- Use the notebook and history documents to preserve not only successes but also architecture dead ends and the reasons for rejecting them.
-
-**Results**
-- More coherent architecture emerged:
-  - ESP32 captures and serves the burst
-  - desktop host performs analysis
-  - app consumes processed results
-
----
-
-## Final Verification Notes
-
-The camera subsystem verification criteria were documented formally in [CAMERA_CODE_DESIGN_VERIFICATION.md](C:/Users/kyles/OneDrive/Documents/Arduino/test/CAMERA_CODE_DESIGN_VERIFICATION.md). The most important verified outcomes were:
-
-- burst capture at or above the required frame rate under tested conditions
-- successful ball detection under normal lighting
-- path-based roll metrics derived from actual tracked motion rather than assumed timing
-- documented failure modes for low light, PCB camera mismatch, Windows BLE limits, and hotspot transfer latency
-
----
-
-## Deliverables Produced or Co-Produced
-
-| Deliverable | Type | Status |
-|---|---|---|
-| Project proposal | Document | Complete |
-| Design document | Document | Complete |
-| Camera subsystem algorithm pseudocode | Design | Complete |
-| `test_burst.ino` burst firmware | Code | Complete, validated |
-| `ball_analyzer.py` analysis pipeline | Code | Complete, revised multiple times |
-| Camera Lab desktop frontend | App / Tooling | Working locally |
-| Analysis change documentation | Document | Complete |
-| Nathan handoff/setup docs | Document | Complete |
-| Camera design verification write-up | Document | Complete |
-| `PROJECT_HISTORY.md` historical reconstruction | Document | Complete |
-
----
-
-## Notes for Final Submission
-
-This notebook is intended to satisfy the digital-lab-notebook requirement by preserving:
-
-- dated objectives
-- work completed
-- debugging and verification details
-- design decisions and rationale
-- references to code and design artifacts
-
-If this is submitted in the course repo, I should also add any supporting figures or screenshots used in final documentation to the same `notebooks/kyle/` directory and reference them from the relevant dated entries.
