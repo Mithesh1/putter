@@ -1,4 +1,5 @@
 \# Kyle Smith Lab Notebook
+
 ECE 445 Senior Design - Sensor Integrated Putter (Project 74)
 
 Author: Kyle Smith
